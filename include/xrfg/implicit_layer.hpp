@@ -131,6 +131,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_capture_at_end_frame(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] binding_queue` (Rever VR): give the runtime the layer's own binding queue on
+// every runtime, not only SteamVR. For an API layer above OFXR that finishes the
+// application's frame on the GPU after its release (Rever's DLSS-NR layer, ~10 ms later):
+// with the application's queue, each downstream xrEndFrame on Virtual Desktop - repeats
+// too - waited behind that work. Off unless set to 1. Read at xrCreateSession.
+[[nodiscard]] bool read_binding_queue(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] excluded_processes`: executable names, separated by ';', in which
 // the layer declines to load at negotiation. Absent, it is Pimax Home: a
 // home environment is an OpenXR application like any other, takes the

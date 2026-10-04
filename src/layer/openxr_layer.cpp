@@ -5018,7 +5018,12 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame,
         state->deep_pipeline ? 1u : 0u,
         triple_requested ? 1u : 0u);
-    if (dispatch->steamvr_runtime &&
+    // Rever VR: `[ofxr] binding_queue=1` asks for the binding queue on every runtime (see
+    // read_binding_queue).
+    const bool binding_queue_requested =
+        dispatch->steamvr_runtime ||
+        xrfg::implicit_layer::read_binding_queue(current_layer_directory());
+    if (binding_queue_requested &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
         const auto* first = state->d3d11_bridge || state->vulkan_bridge
