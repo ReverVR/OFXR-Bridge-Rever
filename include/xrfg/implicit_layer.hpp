@@ -114,7 +114,8 @@ struct ConfiguredNvidiaOptions {
 // every runtime, not only SteamVR. For an API layer above OFXR that finishes the
 // application's frame on the GPU after its release (Rever's DLSS-NR layer, ~10 ms later):
 // with the application's queue, each downstream xrEndFrame on Virtual Desktop - repeats
-// too - waited behind that work. Off unless set to 1. Read at xrCreateSession.
+// too - waited behind that work. Off unless set to 1, or OFXR_BINDING_QUEUE=1 in the
+// application's environment. Read at xrCreateSession.
 [[nodiscard]] bool read_binding_queue(
     const std::filesystem::path& module_directory) noexcept;
 

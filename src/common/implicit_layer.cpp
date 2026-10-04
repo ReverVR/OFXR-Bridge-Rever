@@ -271,9 +271,20 @@ bool read_single_swapchain_rings(
     }
 }
 
+// Rever VR: its options can also come in the game's environment (Rever launches the game and
+// rewrites tray.ini at every launch; the tray does not know these keys).
+static bool rever_environment_flag(const wchar_t* name) noexcept {
+    wchar_t value[8] = {};
+    const DWORD length = GetEnvironmentVariableW(name, value, 8);
+    return length > 0 && length < 8 && value[0] == L'1';
+}
+
 bool read_binding_queue(
     const std::filesystem::path& module_directory) noexcept {
     try {
+        if (rever_environment_flag(L"OFXR_BINDING_QUEUE")) {
+            return true;
+        }
         if (module_directory.empty()) {
             return false;
         }
@@ -288,6 +299,9 @@ bool read_binding_queue(
 bool read_presenter_from_start(
     const std::filesystem::path& module_directory) noexcept {
     try {
+        if (rever_environment_flag(L"OFXR_PRESENTER_FROM_START")) {
+            return true;
+        }
         if (module_directory.empty()) {
             return false;
         }
