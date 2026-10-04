@@ -905,6 +905,8 @@ struct SessionState {
     bool pipelined_presenter_mode{};
     bool pipelined_presenter_start_requested{};
     bool steamvr_presenter_start_requested{};
+    // Rever VR: `[ofxr] presenter_from_start=1` (read_presenter_from_start).
+    bool presenter_from_start{};
     // The application's D3D11 device was created
     // D3D11_CREATE_DEVICE_SINGLETHREADED - Unity's default. D3D11 then does
     // no locking of its own, and the runtime uses that device inside the
@@ -5023,6 +5025,8 @@ XrResult layer_create_session_impl(
     const bool binding_queue_requested =
         dispatch->steamvr_runtime ||
         xrfg::implicit_layer::read_binding_queue(current_layer_directory());
+    state->presenter_from_start =
+        xrfg::implicit_layer::read_presenter_from_start(current_layer_directory());
     if (binding_queue_requested &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
@@ -12910,7 +12914,8 @@ XrResult layer_end_frame_impl(
         // private image in an uncertain ownership phase for the whole timeout.
         clear_generation_continuity(state);
     } else if (!presenter_forbidden(*state) &&
-               (steamvr_wait_requires_continuous_presenter(
+               (state->presenter_from_start ||
+                steamvr_wait_requires_continuous_presenter(
                     state,
                     current_cycle) ||
                 runtime_wait_lacks_pacing(state) ||
