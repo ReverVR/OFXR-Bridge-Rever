@@ -118,6 +118,13 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_binding_queue(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] presenter_from_start` (Rever VR): request the continuous presenter after the first
+// completed inline pair instead of waiting for a pacing signal. On Titanfall 2 + DLSS-NR the
+// signal only came after a level reload: until then the session stayed inline, the game held
+// at 36 fps with one frame shown per frame. Off unless set to 1. Read at xrCreateSession.
+[[nodiscard]] bool read_presenter_from_start(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] excluded_processes`: executable names, separated by ';', in which
 // the layer declines to load at negotiation. Absent, it is Pimax Home: a
 // home environment is an OpenXR application like any other, takes the
