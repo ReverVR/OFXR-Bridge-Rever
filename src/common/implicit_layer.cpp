@@ -271,6 +271,20 @@ bool read_single_swapchain_rings(
     }
 }
 
+bool read_binding_queue(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"binding_queue", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 std::vector<std::wstring> read_excluded_processes(
     const std::filesystem::path& module_directory) noexcept {
     std::vector<std::wstring> names;
