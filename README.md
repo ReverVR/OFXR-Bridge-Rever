@@ -1,5 +1,29 @@
 # OFXR Bridge
 
+> [!NOTE]
+> **This is the Rever VR fork** (branch `rever-nr`, build **V4161**), based on
+> [djules75's OFXR Bridge](https://github.com/djules75/OFXR-Bridge) v0.2.11.2,
+> itself built on tig3rmast3r's v0.2.1. All credit for OFXR goes to them.
+> [Rever VR Mod Installer](https://github.com/ReverVR) ships this build for
+> games launched with **DLSS5 (NVIDIA DLSS-NR) + frame generation**: Rever's
+> own implicit OpenXR layer runs DLSS-NR
+> and FSR 1 on the game's real frames above OFXR, and OFXR then generates the
+> in-between frames (validated on Titanfall 2 VR: 144 Hz locked on Quest 3 +
+> Virtual Desktop with SSW, RTX 4090).
+>
+> Changes, all **off unless asked for** (identical behaviour otherwise):
+> * `[ofxr] binding_queue=1` (or `OFXR_BINDING_QUEUE=1` in the game's
+>   environment): OFXR's own binding queue on every runtime, not only SteamVR.
+>   With a layer above OFXR that finishes the game's frame on the GPU after its
+>   release, Virtual Desktop's `xrEndFrame` otherwise waited behind that work
+>   (up to ~13 ms) and OFXR missed 144 Hz slots.
+> * `[ofxr] presenter_from_start=1` (or `OFXR_PRESENTER_FROM_START=1`): the
+>   continuous presenter from the first generated pair (experimental).
+> * Build number V4161, so its `RuntimeLayer\v4161` folder never collides with
+>   the official build.
+>
+> License unchanged: LGPL-3.0-or-later.
+
 OFXR Bridge is an experimental OpenXR API layer that inserts an optical-flow
 generated frame between two rendered frames.
 
