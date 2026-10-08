@@ -1,8 +1,8 @@
 # OFXR Bridge
 
 > [!NOTE]
-> **This is the Rever VR fork** (branch `rever-nr`, build **V4161**), based on
-> [djules75's OFXR Bridge](https://github.com/djules75/OFXR-Bridge) v0.2.11.2,
+> **This is the Rever VR fork** (branch `rever-0.2.13.1`, build **V4381**), based on
+> [djules75's OFXR Bridge](https://github.com/djules75/OFXR-Bridge) v0.2.13.1,
 > itself built on tig3rmast3r's v0.2.1. All credit for OFXR goes to them.
 > [Rever VR Mod Installer](https://github.com/ReverVR) ships this build for
 > games launched with **DLSS5 (NVIDIA DLSS-NR) + frame generation**: Rever's
