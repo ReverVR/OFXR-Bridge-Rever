@@ -19,7 +19,7 @@
 >   (up to ~13 ms) and OFXR missed 144 Hz slots.
 > * `[ofxr] presenter_from_start=1` (or `OFXR_PRESENTER_FROM_START=1`): the
 >   continuous presenter from the first generated pair (experimental).
-> * Build number V4161, so its `RuntimeLayer\v4161` folder never collides with
+> * Build number V4381, so its `RuntimeLayer\v4381` folder never collides with
 >   the official build.
 >
 > License unchanged: LGPL-3.0-or-later.
