@@ -1,5 +1,28 @@
 # OFXR Bridge
 
+> [!NOTE]
+> **This is the Rever VR fork** (branch `rever-0.2.14.3`, build **V5771**), based on
+> [djules75's OFXR Bridge](https://github.com/djules75/OFXR-Bridge) v0.2.14.3,
+> itself built on tig3rmast3r's v0.2.1. All credit for OFXR goes to them.
+> [Rever VR Mod Installer](https://github.com/ReverVR) ships this build for
+> games launched with frame generation under Rever's own implicit OpenXR layer
+> (DLSS-NR, FSR, statistics, recording), which sits above OFXR.
+>
+> Changes, all **off unless asked for** (identical behaviour otherwise):
+> * `[ofxr] binding_queue=1` (or `OFXR_BINDING_QUEUE=1` in the game's
+>   environment): OFXR's own binding queue on every runtime, not only SteamVR.
+>   With a layer above OFXR that finishes the game's frame on the GPU after its
+>   release, Virtual Desktop's `xrEndFrame` otherwise waited behind that work
+>   (up to ~13 ms) and OFXR missed 144 Hz slots.
+> * `[ofxr] presenter_from_start=1` (or `OFXR_PRESENTER_FROM_START=1`): the
+>   continuous presenter from the first generated pair (experimental).
+> * `OFXR_FLIGHT_LOG=1` in the game's environment: the flight log on, as
+>   `[diagnostics] logging_enabled=1`, without touching the tray's settings.
+> * Build number V5771, so its `RuntimeLayer\v5771` folder never collides with
+>   the official build.
+>
+> License unchanged: LGPL-3.0-or-later.
+
 **Frame generation for VR: a smoother experience, at your headset's refresh
 rate.**
 

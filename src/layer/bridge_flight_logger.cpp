@@ -188,6 +188,15 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         session_record(operation, 0);
 }
 
+// Rever VR: OFXR_FLIGHT_LOG=1 in the game's environment turns the flight log on, as
+// [diagnostics] logging_enabled=1 does (Rever launches the game and rewrites the tray's settings at
+// every launch; a test needs the log without touching them).
+[[nodiscard]] bool rever_flight_log_requested() noexcept {
+    wchar_t value[8] = {};
+    const DWORD length = GetEnvironmentVariableW(L"OFXR_FLIGHT_LOG", value, 8);
+    return length > 0 && length < 8 && value[0] == L'1';
+}
+
 [[nodiscard]] std::filesystem::path fallback_log_directory() {
     std::array<wchar_t, 32768> buffer{};
     const DWORD length = GetEnvironmentVariableW(
@@ -653,7 +662,8 @@ void BridgeFlightLogger::initialize(
         if (!QueryPerformanceFrequency(&implementation->frequency)) {
             return;
         }
-        const bool wanted = ini_file::read_int(implementation->config_path, kConfigurationSection, L"logging_enabled", 0) != 0;
+        const bool wanted = rever_flight_log_requested() ||
+            ini_file::read_int(implementation->config_path, kConfigurationSection, L"logging_enabled", 0) != 0;
         const UINT maximum_mb = std::clamp<UINT>(
             ini_file::read_int(implementation->config_path, kConfigurationSection, L"max_file_mb", 32),
             1,
@@ -718,7 +728,8 @@ void BridgeFlightLogger::follow_setting() noexcept {
         impl_->next_poll_counter.store(
             now.QuadPart + impl_->frequency.QuadPart / 4,
             std::memory_order_relaxed);
-        const bool wanted = ini_file::read_int(impl_->config_path, kConfigurationSection, L"logging_enabled", 0) != 0;
+        const bool wanted = rever_flight_log_requested() ||
+            ini_file::read_int(impl_->config_path, kConfigurationSection, L"logging_enabled", 0) != 0;
         if (wanted == impl_->active.load(std::memory_order_acquire)) {
             impl_->pending_setting_seen = false;
             return;
