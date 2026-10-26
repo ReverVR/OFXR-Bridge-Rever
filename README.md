@@ -18,6 +18,11 @@
 >   continuous presenter from the first generated pair (experimental).
 > * `OFXR_FLIGHT_LOG=1` in the game's environment: the flight log on, as
 >   `[diagnostics] logging_enabled=1`, without touching the tray's settings.
+> * Rever Streamer's runtime (`Rever Streamer` in its name) keeps the fixed
+>   inline rule of Virtual Desktop and Pimax OpenXR. On the generic path the
+>   presenter held the D3D11 runtime-entry gate across a whole `xrWaitFrame`
+>   and every swapchain call of the game waited behind it (Titanfall 2 at 3X:
+>   2 fps; inline: 45 real at 90 Hz).
 > * Build number V5771, so its `RuntimeLayer\v5771` folder never collides with
 >   the official build.
 >
