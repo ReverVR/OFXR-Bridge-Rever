@@ -4670,10 +4670,18 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->virtual_desktop_runtime =
                 std::string_view(dispatch->runtime_name).find(
                     "VirtualDesktopXR") != std::string_view::npos;
+            // Rever VR: Rever Streamer's runtime too. On the generic path its
+            // presenter held the D3D11 runtime-entry gate across a whole
+            // xrWaitFrame (11 ms at 90 Hz), and every swapchain call the game
+            // made waited behind it: Titanfall 2 at 3X sank to 2 fps. Inline,
+            // as on Virtual Desktop and Pimax, it ran 45 real at 90 Hz with
+            // swapchain calls under 0.2 ms (Rever VR, 2026-10-26).
             dispatch->inline_unless_pipelined =
                 dispatch->virtual_desktop_runtime ||
                 std::string_view(dispatch->runtime_name).find(
-                    "Pimax OpenXR") != std::string_view::npos;
+                    "Pimax OpenXR") != std::string_view::npos ||
+                std::string_view(dispatch->runtime_name).find(
+                    "Rever Streamer") != std::string_view::npos;
         }
     }
     xrfg::bridge_flight_logger().event(

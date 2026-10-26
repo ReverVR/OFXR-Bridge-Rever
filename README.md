@@ -1,7 +1,7 @@
 # OFXR Bridge
 
 > [!NOTE]
-> **This is the Rever VR fork** (branch `rever-0.2.13.4`, build **V4641**), based on
+> **This is the Rever VR fork** (branch `rever-0.2.13.4`, build **V4642**), based on
 > [djules75's OFXR Bridge](https://github.com/djules75/OFXR-Bridge) v0.2.13.4,
 > itself built on tig3rmast3r's v0.2.1. All credit for OFXR goes to them.
 > [Rever VR Mod Installer](https://github.com/ReverVR) ships this build for
@@ -19,7 +19,12 @@
 >   (up to ~13 ms) and OFXR missed 144 Hz slots.
 > * `[ofxr] presenter_from_start=1` (or `OFXR_PRESENTER_FROM_START=1`): the
 >   continuous presenter from the first generated pair (experimental).
-> * Build number V4641, so its `RuntimeLayer\v4641` folder never collides with
+> * Rever Streamer's runtime (`Rever Streamer` in its name) keeps the fixed
+>   inline rule of Virtual Desktop and Pimax OpenXR. On the generic path the
+>   presenter held the D3D11 runtime-entry gate across a whole `xrWaitFrame`
+>   and every swapchain call of the game waited behind it (Titanfall 2 at 3X:
+>   2 fps; inline: 45 real at 90 Hz).
+> * Build number V4642, so its `RuntimeLayer\v4642` folder never collides with
 >   the official build.
 >
 > License unchanged: LGPL-3.0-or-later.
