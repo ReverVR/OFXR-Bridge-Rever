@@ -1030,6 +1030,14 @@ struct SessionState {
     bool triple_switchable{};
     // The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point triple_poll_at{};
+    // Rever VR's dynamic 2X / 3X (read_dynamic_frame_gen): the shape follows
+    // the application's own frame time - from its xrWaitFrame returning to
+    // its xrEndFrame - not the tray's ini. The return is stamped by the wait
+    // thread; the average and the hold belong to the xrEndFrame thread.
+    bool dynamic_frame_gen{};
+    std::atomic<std::int64_t> dynamic_wait_returned_ns{};
+    double dynamic_frame_ns{};
+    std::chrono::steady_clock::time_point dynamic_hold_until{};
     // The flight log's vram_usage records. The adapter is found from the
     // first device the session has; what it reports is the process's use of
     // that adapter, whichever device made the allocation.
@@ -4863,6 +4871,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
     const bool triple_requested =
         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
+    state->dynamic_frame_gen =
+        xrfg::implicit_layer::read_dynamic_frame_gen(current_layer_directory());
     state->single_swapchain_rings =
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->capture_at_end_frame =
@@ -5100,8 +5110,11 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame = 3;
         state->deep_pipeline = false;
     }
+    // Rever VR's dynamic 2X / 3X takes the ring 3X fits in from the start, so
+    // a session that starts at a pair can still go to three.
     state->two_slot_synthetic_ring =
-        state->deep_pipeline || state->frames_per_application_frame > 2;
+        state->deep_pipeline || state->frames_per_application_frame > 2 ||
+        (state->dynamic_frame_gen && triple_binding);
     state->triple_switchable =
         triple_binding && state->two_slot_synthetic_ring;
     if (triple_binding && !state->triple_switchable) {
@@ -12310,17 +12323,61 @@ void apply_live_frame_multiplier(
         if (!state->triple_switchable) {
             return;
         }
+        const auto now = std::chrono::steady_clock::now();
+        // Rever VR's dynamic 2X / 3X: the application's frame time, averaged
+        // over about a dozen frames (its pace is the shape's, its frame time
+        // is what it can do)
+        if (state->dynamic_frame_gen) {
+            const std::int64_t returned =
+                state->dynamic_wait_returned_ns.load(std::memory_order_relaxed);
+            const std::int64_t frame_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() -
+                returned;
+            if (returned > 0 && frame_ns > 0 && frame_ns < 500'000'000) {
+                state->dynamic_frame_ns = state->dynamic_frame_ns <= 0.0
+                    ? static_cast<double>(frame_ns)
+                    : state->dynamic_frame_ns * 0.92 + static_cast<double>(frame_ns) * 0.08;
+            }
+        }
         // The ini is rewritten by the tray; a read every quarter second is
         // cheap and nothing here is urgent.
-        const auto now = std::chrono::steady_clock::now();
         if (now < state->triple_poll_at) {
             return;
         }
         state->triple_poll_at = now + std::chrono::milliseconds(250);
-        const std::uint32_t target =
+        std::uint32_t target =
             xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory())
                 ? 3U
                 : 2U;
+        if (state->dynamic_frame_gen) {
+            // 3X once a frame takes more than two display periods (2X would
+            // miss its slot), 2X again only when it fits well in two (a
+            // margin against flapping), never sooner than 3 s after a change
+            target = state->frames_per_application_frame;
+            const double period =
+                static_cast<double>(state->minimum_runtime_display_period);
+            if (period > 0.0 && state->dynamic_frame_ns > 0.0 &&
+                now >= state->dynamic_hold_until) {
+                const double periods = state->dynamic_frame_ns / period;
+                if (target == 2U && periods > 2.05) {
+                    target = 3U;
+                } else if (target == 3U && periods < 1.7) {
+                    target = 2U;
+                }
+                if (target != state->frames_per_application_frame) {
+                    state->dynamic_hold_until = now + std::chrono::seconds(3);
+                    // 701: Rever VR's dynamic shape. a the new frames per
+                    // application frame, b the frame time in microseconds,
+                    // c the display period in microseconds
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        701,
+                        target,
+                        static_cast<std::uint64_t>(state->dynamic_frame_ns / 1000.0),
+                        static_cast<std::uint64_t>(period / 1000.0));
+                }
+            }
+        }
         if (target == state->frames_per_application_frame) {
             return;
         }
@@ -13597,6 +13654,16 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_wait_frame(
     const XrResult result = guard_c_api_boundary([&] {
         return layer_wait_frame_impl(session, wait_info, frame_state);
     });
+    // Rever VR's dynamic 2X / 3X: the application's frame starts here
+    if (XR_SUCCEEDED(result)) {
+        if (const auto state = find_session(session); state && state->dynamic_frame_gen) {
+            state->dynamic_wait_returned_ns.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count(),
+                std::memory_order_relaxed);
+        }
+    }
     xrfg::bridge_flight_logger().end(
         token,
         xrfg::BridgeFlightOperation::application_wait_frame,

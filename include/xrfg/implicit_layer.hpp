@@ -105,6 +105,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// Rever VR: `[ofxr] dynamic_frame_gen` (or OFXR_DYNAMIC_FRAME_GEN=1 in the
+// game's environment): on a session that can take either shape, 2X or 3X is
+// chosen from how long the application takes for a frame instead of from
+// triple_frame_gen - 3X when it cannot make two display periods, 2X again
+// once it fits well in them. Off unless set to 1. Read at xrCreateSession.
+[[nodiscard]] bool read_dynamic_frame_gen(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] vulkan_session_bridge`: a Vulkan game's session is handed to the
 // runtime as a D3D12 one on the layer's device, the game rendering into
 // Vulkan imports of the layer's shared textures, so every path downstream is
