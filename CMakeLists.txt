@@ -344,6 +344,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     add_library(xrfg_d3d12_history STATIC
         src/d3d11/d3d11_d3d12_interop.cpp
         src/d3d11/d3d11_bridge.cpp
+        src/d3d11/rever_game_motion.cpp
         src/vulkan/vulkan_d3d12_interop.cpp
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
@@ -1436,6 +1437,19 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             add_test(NAME xrfg_d3d12_nvidia_x86 COMMAND xrfg_d3d12_history_tests nvidia)
             set_tests_properties(xrfg_d3d12_nvidia_x86 PROPERTIES LABELS needs_gpu_timing)
         endif()
+
+        add_executable(xrfg_rever_game_motion_tests tests/rever_game_motion_tests.cpp)
+        target_include_directories(xrfg_rever_game_motion_tests PRIVATE include)
+        target_link_libraries(xrfg_rever_game_motion_tests PRIVATE xrfg_d3d12_history)
+        target_compile_features(xrfg_rever_game_motion_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_rever_game_motion_tests PRIVATE
+                /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_rever_game_motion_tests PRIVATE
+                NOMINMAX
+                WIN32_LEAN_AND_MEAN)
+        endif()
+        add_test(NAME xrfg_rever_game_motion_tests COMMAND xrfg_rever_game_motion_tests)
 
         add_executable(xrfg_vertical_fov_tests tests/vertical_fov_tests.cpp)
         target_include_directories(xrfg_vertical_fov_tests PRIVATE include)

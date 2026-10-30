@@ -133,6 +133,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::history_capture_wait: return "history_capture_wait";
     case BridgeFlightOperation::arm_control: return "arm_control";
     case BridgeFlightOperation::process_identity: return "process_identity";
+    case BridgeFlightOperation::rever_game_motion: return "rever_game_motion";
     }
     return "unknown";
 }
