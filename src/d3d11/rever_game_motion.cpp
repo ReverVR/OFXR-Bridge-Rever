@@ -4,11 +4,13 @@
 #include "xrfg/dlss_motion_vectors.hpp"
 
 #include <windows.h>
+#include <share.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -76,6 +78,17 @@ void log_event(std::int64_t result, std::uint64_t a = 0, std::uint64_t b = 0,
                std::uint64_t c = 0) noexcept {
     bridge_flight_logger().event(
         BridgeFlightOperation::rever_game_motion, result, a, b, c);
+    static const char* const names[] = {"", "channel opened", "layout", "first publish", "statistics",
+                                        "textures opened", "channel missing", "channel foreign"};
+    if (result > 0 && result <= kEventChannelForeign) {
+        rever_game_motion_note("%s (%llu, %llu, %llu)", names[result], static_cast<unsigned long long>(a),
+                               static_cast<unsigned long long>(b), static_cast<unsigned long long>(c));
+    } else {
+        rever_game_motion_note("failed: HRESULT 0x%08llx at stage %llu (%llu, %llu)",
+                               static_cast<unsigned long long>(result) & 0xFFFFFFFFULL,
+                               static_cast<unsigned long long>(a), static_cast<unsigned long long>(b),
+                               static_cast<unsigned long long>(c));
+    }
 }
 
 struct UniqueHandle {
@@ -95,6 +108,31 @@ bool view_in_bounds(const ReverGameMotionView& view, std::uint32_t width,
 }
 
 }  // namespace
+
+void rever_game_motion_note(const char* format, ...) noexcept {
+    static std::mutex lock;
+    static FILE* file = nullptr;
+    static bool tried = false;
+    std::scoped_lock guard(lock);
+    if (!tried) {
+        tried = true;
+        wchar_t local[MAX_PATH] = {};
+        if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) {
+            const std::wstring path = std::wstring(local) + L"/ReverVR/ofxr_game_motion.log";
+            file = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
+        }
+    }
+    if (!file) return;
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    std::fprintf(file, "%02u:%02u:%02u.%03u ", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(file, format, args);
+    va_end(args);
+    std::fputc(10, file);  // a line feed
+    std::fflush(file);
+}
 
 bool rever_game_motion_requested() noexcept {
     wchar_t value[8] = {};
