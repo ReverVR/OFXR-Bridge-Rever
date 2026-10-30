@@ -5271,6 +5271,13 @@ XrResult layer_create_session_impl(
     }
     // Rever VR: the game's own motion vectors, on a D3D11 game only - the
     // bridged session, or the D3D11 interop once its D3D12 device exists.
+    if (state->rever_game_motion_requested) {
+        xrfg::rever_game_motion_note(
+            "session: requested; binding %d, d3d11 bridge %d, d3d11 device %d, d3d12 device %d, queue %d",
+            static_cast<int>(state->graphics_binding), state->d3d11_bridge ? 1 : 0,
+            state->d3d11_device && state->d3d11_context ? 1 : 0, state->d3d12_device ? 1 : 0,
+            state->d3d12_queue ? 1 : 0);
+    }
     if (state->rever_game_motion_requested &&
         (state->d3d11_bridge ||
          (state->graphics_binding == SessionGraphicsBinding::d3d11 &&

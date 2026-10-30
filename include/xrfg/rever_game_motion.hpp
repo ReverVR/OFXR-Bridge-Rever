@@ -33,6 +33,10 @@ namespace xrfg {
 // Read once per session: OFXR_REVER_GAME_MOTION=1 in the environment.
 [[nodiscard]] bool rever_game_motion_requested() noexcept;
 
+// One line in %LOCALAPPDATA%\ReverVR\ofxr_game_motion.log (written whenever the game motion is requested, whatever
+// the diagnostics setting: Rever's app keeps OFXR's own log off, its every-frame writes cost latency).
+void rever_game_motion_note(const char* format, ...) noexcept;
+
 // One projection view as the application submitted it, enough to tell the
 // eye layout of the swapchain it names.
 struct ReverGameMotionView {
