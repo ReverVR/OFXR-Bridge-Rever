@@ -117,7 +117,8 @@ void rever_game_motion_note(const char* format, ...) noexcept {
     if (!tried) {
         tried = true;
         wchar_t local[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) {
+        // only in a game Rever's app asked it for (the tests never write the real log)
+        if (rever_game_motion_requested() && GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) {
             const std::wstring path = std::wstring(local) + L"/ReverVR/ofxr_game_motion.log";
             file = _wfsopen(path.c_str(), L"w", _SH_DENYNO);
         }
@@ -274,6 +275,12 @@ struct ReverGameMotionSource::Impl {
     std::uint32_t opened_pid{};
     std::array<ComPtr<ID3D11Texture2D>, 2> producer_motion;
     std::array<ComPtr<IDXGIKeyedMutex>, 2> producer_mutex;
+    // The game's depth per eye: not read here, but handed back with the
+    // vectors - Rever Inject offers a frame only once all four of its
+    // textures are back (first headset run, 2026-10-30: the depth kept the
+    // game's key, one frame was offered and every later one left out).
+    std::array<ComPtr<ID3D11Texture2D>, 2> producer_depth;
+    std::array<ComPtr<IDXGIKeyedMutex>, 2> depth_mutex;
     std::array<std::uint32_t, 2> producer_width{};
     std::array<std::uint32_t, 2> producer_height{};
     std::array<LONG, 2> last_seq{};
@@ -323,6 +330,8 @@ struct ReverGameMotionSource::Impl {
         for (std::size_t eye = 0; eye < 2; ++eye) {
             producer_mutex[eye].Reset();
             producer_motion[eye].Reset();
+            depth_mutex[eye].Reset();
+            producer_depth[eye].Reset();
             producer_width[eye] = 0;
             producer_height[eye] = 0;
         }
@@ -493,6 +502,18 @@ struct ReverGameMotionSource::Impl {
             }
             producer_width[eye] = description.Width;
             producer_height[eye] = description.Height;
+            swprintf_s(name, L"Local\\ReverVR_SR_%u_%ld_%uD", pid, generation, eye);
+            result = d3d11_device1->OpenSharedResourceByName(
+                name, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+                IID_PPV_ARGS(producer_depth[eye].GetAddressOf()));
+            if (SUCCEEDED(result)) {
+                result = producer_depth[eye].As(&depth_mutex[eye]);
+            }
+            if (FAILED(result)) {
+                close_textures();
+                fail(kStageOpenTexture, result);
+                return false;
+            }
         }
         textures_open = true;
         log_event(kEventTexturesOpened, pid,
@@ -620,12 +641,14 @@ struct ReverGameMotionSource::Impl {
             ++busy;
             return;
         }
-        if (producer_mutex[0]->AcquireSync(1, 0) != S_OK) {
-            ++busy;
-            return;
-        }
-        if (producer_mutex[1]->AcquireSync(1, 0) != S_OK) {
-            producer_mutex[0]->ReleaseSync(1);  // as the game left it
+        // all four of the frame's textures, or none (each given back with
+        // the game's key, as it left them)
+        IDXGIKeyedMutex* const frame_mutexes[4] = {producer_mutex[0].Get(), producer_mutex[1].Get(),
+                                                   depth_mutex[0].Get(), depth_mutex[1].Get()};
+        int held = 0;
+        while (held < 4 && frame_mutexes[held]->AcquireSync(1, 0) == S_OK) ++held;
+        if (held < 4) {
+            for (int index = 0; index < held; ++index) frame_mutexes[index]->ReleaseSync(1);
             ++busy;
             return;
         }
@@ -643,8 +666,7 @@ struct ReverGameMotionSource::Impl {
                     producer_motion[stream.producer_eye[half]].Get(), 0, &box);
             }
         }
-        producer_mutex[0]->ReleaseSync(0);
-        producer_mutex[1]->ReleaseSync(0);
+        for (IDXGIKeyedMutex* const mutex : frame_mutexes) mutex->ReleaseSync(0);
         last_seq = seq;
         have_last_seq = true;
 

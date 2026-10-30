@@ -227,6 +227,8 @@ void producer_channel_end_to_end() {
     std::vector<HANDLE> shared_handles;
     std::array<ComPtr<ID3D11Texture2D>, 2> motion;
     std::array<ComPtr<IDXGIKeyedMutex>, 2> keyed;
+    std::array<ComPtr<ID3D11Texture2D>, 2> depth;
+    std::array<ComPtr<IDXGIKeyedMutex>, 2> depth_keyed;
     std::array<ComPtr<ID3D11RenderTargetView>, 2> target;
     for (std::uint32_t eye = 0; eye < 2; ++eye) {
         D3D11_TEXTURE2D_DESC description{};
@@ -253,6 +255,18 @@ void producer_channel_end_to_end() {
         require_hr(motion[eye].As(&keyed[eye]), "keyed mutex");
         require_hr(device->CreateRenderTargetView(motion[eye].Get(), nullptr,
                        target[eye].GetAddressOf()), "producer view");
+        // the depth beside the vectors, as Rever Inject makes it
+        description.Format = DXGI_FORMAT_R32_FLOAT;
+        require_hr(device->CreateTexture2D(&description, nullptr, depth[eye].GetAddressOf()),
+                   "producer depth");
+        ComPtr<IDXGIResource1> depth_resource;
+        require_hr(depth[eye].As(&depth_resource), "depth IDXGIResource1");
+        swprintf_s(name, L"Local\\ReverVR_SR_%u_%ld_%uD", block->pid, block->generation, eye);
+        require_hr(depth_resource->CreateSharedHandle(nullptr,
+                       DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, name, &handle),
+                   "named shared depth handle");
+        shared_handles.push_back(handle);
+        require_hr(depth[eye].As(&depth_keyed[eye]), "depth keyed mutex");
     }
     float base = 1.0F;
     const auto produce = [&](bool release_to_consumer) {
@@ -264,6 +278,9 @@ void producer_channel_end_to_end() {
             // Kept (key 0): the sequence moves but the consumer cannot take it.
             require_hr(keyed[eye]->ReleaseSync(release_to_consumer ? 1 : 0),
                        "producer release");
+            require(depth_keyed[eye]->AcquireSync(0, 1000) == S_OK, "producer depth acquire");
+            require_hr(depth_keyed[eye]->ReleaseSync(release_to_consumer ? 1 : 0),
+                       "producer depth release");
             InterlockedIncrement(&block->eyes[eye].seq);
         }
         context->Flush();
@@ -313,6 +330,13 @@ void producer_channel_end_to_end() {
         require(published() == 0, "another swapchain publishes nothing");
         release();
         require(published() == 1, "a new frame publishes one side-by-side stream");
+        // all four handed back: Rever Inject offers its next frame only then
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            require(keyed[eye]->AcquireSync(0, 0) == S_OK, "the vectors handed back");
+            require(depth_keyed[eye]->AcquireSync(0, 0) == S_OK, "the depth handed back");
+            require_hr(keyed[eye]->ReleaseSync(0), "vectors kept");
+            require_hr(depth_keyed[eye]->ReleaseSync(0), "depth kept");
+        }
         release();
         require(published() == 1, "the same frame again publishes nothing");
 
@@ -413,6 +437,9 @@ void producer_channel_end_to_end() {
 }  // namespace
 
 int main() {
+    // the game motion's text log in the temporary folder, never the user's ReverVR folder
+    wchar_t temporary[MAX_PATH] = {};
+    if (GetTempPathW(MAX_PATH, temporary)) SetEnvironmentVariableW(L"LOCALAPPDATA", temporary);
     try {
         side_by_side_lone_echo();
         side_by_side_eyes_swapped();
