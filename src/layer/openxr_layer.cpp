@@ -9,6 +9,7 @@
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/embedded_control.hpp"
 #include "xrfg/provider_api.hpp"
+#include "xrfg/rever_game_motion.hpp"
 #include <atomic>
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
@@ -1059,6 +1060,13 @@ struct SessionState {
     bool vulkan_support{};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     bool dlss_motion_vectors{};
+    // Rever VR: OFXR_REVER_GAME_MOTION=1 in the game's environment, read at
+    // xrCreateSession. The game's own vectors from Rever's channel feed the
+    // game-motion path (see xrfg::ReverGameMotionSource); it also keeps
+    // dlss_motion_vectors on. Absent or 0: false, rever_game_motion stays
+    // null and nothing below changes.
+    bool rever_game_motion_requested{};
+    std::unique_ptr<xrfg::ReverGameMotionSource> rever_game_motion;
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
     // Set once the runtime has refused a private swapchain. A runtime caps how
@@ -4883,6 +4891,7 @@ XrResult layer_create_session_impl(
     state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
+    state->rever_game_motion_requested = xrfg::rever_game_motion_requested();
     state->control_revision = initial_control.revision;
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
@@ -5260,6 +5269,22 @@ XrResult layer_create_session_impl(
             state->graphics_binding_capabilities |= 8ULL;
         }
     }
+    // Rever VR: the game's own motion vectors, on a D3D11 game only - the
+    // bridged session, or the D3D11 interop once its D3D12 device exists.
+    if (state->rever_game_motion_requested &&
+        (state->d3d11_bridge ||
+         (state->graphics_binding == SessionGraphicsBinding::d3d11 &&
+          state->d3d11_device && state->d3d11_context)) &&
+        state->d3d12_device && state->d3d12_queue) {
+        try {
+            state->rever_game_motion =
+                std::make_unique<xrfg::ReverGameMotionSource>();
+            xrfg::configure_dlss_motion_vector_tracking(true);
+            state->dlss_motion_vectors = true;
+        } catch (...) {
+            state->rever_game_motion.reset();
+        }
+    }
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::session_binding,
         static_cast<std::int64_t>(state->graphics_binding),
@@ -5302,6 +5327,8 @@ XrResult layer_destroy_session_impl(XrSession session) {
         destroy_frame_generation_swapchains(swapchain_state);
     }
     drain_binding_queue(state.get());
+    // Waits for its own last queue work, then retires its registry streams.
+    state->rever_game_motion.reset();
 
     const XrResult result = state->dispatch->destroy_session(session);
     if (XR_SUCCEEDED(result)) {
@@ -6787,6 +6814,42 @@ void log_history_capture_wait(
         (static_cast<std::uint64_t>(wait.limit_us) << 32) | image_index);
 }
 
+// Rever VR: the game's vectors for the image being released, published
+// before resolve_dlss_motion_vectors and the history capture queue on the
+// same D3D12 queue. Only called with SessionState::rever_game_motion set.
+void publish_rever_game_motion(
+    SwapchainState& state,
+    std::uint32_t image_index,
+    const std::shared_ptr<xrfg::SwapchainInterop>& interop) noexcept {
+    try {
+        SessionState& session = *state.session;
+        Microsoft::WRL::ComPtr<ID3D12Resource> output;
+        {
+            std::scoped_lock lock(state.mutex);
+            if (image_index < state.enumerated_d3d12_images.size()) {
+                output = state.enumerated_d3d12_images[image_index];
+            }
+        }
+        if (!output && interop && image_index < interop->source_images().size()) {
+            output = interop->source_images()[image_index];
+        }
+        ID3D11Device* const device = session.d3d11_bridge
+            ? session.d3d11_bridge->device.Get()
+            : session.d3d11_device.Get();
+        ID3D11DeviceContext* const context = session.d3d11_bridge
+            ? session.d3d11_bridge->context.Get()
+            : session.d3d11_context.Get();
+        session.rever_game_motion->publish_for_release(
+            handle_value(state.handle),
+            output.Get(),
+            device,
+            context,
+            session.d3d12_device.Get(),
+            session.d3d12_queue.Get());
+    } catch (...) {
+    }
+}
+
 XrResult release_swapchain_image_locked(
     const std::shared_ptr<SwapchainState>& state,
     XrSwapchain swapchain,
@@ -6866,11 +6929,21 @@ XrResult release_swapchain_image_locked(
     std::optional<xrfg::D3D12HistoryCaptureTicket> pending_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> pending_motion_vectors;
     if (candidate_index && history && !defer_capture) {
+        if (state->session->rever_game_motion) {
+            publish_rever_game_motion(*state, *candidate_index, interop);
+        }
         if (state->session->dlss_motion_vectors) {
             std::scoped_lock lock(state->mutex);
             if (*candidate_index < state->enumerated_d3d12_images.size()) {
                 pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
                     state->enumerated_d3d12_images[*candidate_index].Get(),
+                    state->session->d3d12_queue.Get());
+            } else if (state->session->rever_game_motion && interop &&
+                       *candidate_index < interop->source_images().size()) {
+                // Rever VR: the D3D11 interop keeps no enumerated D3D12
+                // images; its D3D12 sources have the swapchain's shape.
+                pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
+                    interop->source_images()[*candidate_index],
                     state->session->d3d12_queue.Get());
             }
         }
@@ -12053,7 +12126,8 @@ void apply_embedded_control(
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
-    state->dlss_motion_vectors = control.desired.motion_vectors == 1;
+    state->dlss_motion_vectors = control.desired.motion_vectors == 1 ||
+        state->rever_game_motion != nullptr;
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
         // The same gates the enumeration path applies, and for the same reason.
@@ -12477,6 +12551,38 @@ void log_video_memory_periodically(SessionState& state) noexcept {
     log_video_memory(state, VideoMemoryStage::periodic, 0);
 }
 
+// Rever VR: the application's first stereo projection layer, for
+// ReverGameMotionSource. Only called with SessionState::rever_game_motion set.
+void note_rever_game_motion_views(
+    SessionState& state, const XrFrameEndInfo* end_info) noexcept {
+    std::array<xrfg::ReverGameMotionView, 2> views{};
+    bool valid = false;
+    if (end_info != nullptr && end_info->layers != nullptr) {
+        for (std::uint32_t index = 0; index < end_info->layerCount && !valid; ++index) {
+            const XrCompositionLayerBaseHeader* const layer = end_info->layers[index];
+            if (layer == nullptr || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                continue;
+            }
+            const auto* projection =
+                reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            if (projection->viewCount != 2 || projection->views == nullptr) {
+                continue;
+            }
+            for (std::uint32_t eye = 0; eye < 2; ++eye) {
+                const XrSwapchainSubImage& sub_image = projection->views[eye].subImage;
+                views[eye].swapchain = handle_value(sub_image.swapchain);
+                views[eye].array_index = sub_image.imageArrayIndex;
+                views[eye].x = sub_image.imageRect.offset.x;
+                views[eye].y = sub_image.imageRect.offset.y;
+                views[eye].width = sub_image.imageRect.extent.width;
+                views[eye].height = sub_image.imageRect.extent.height;
+            }
+            valid = true;
+        }
+    }
+    state.rever_game_motion->set_views(valid, views);
+}
+
 XrResult layer_end_frame_impl(
     XrSession session,
     const XrFrameEndInfo* end_info) {
@@ -12495,6 +12601,11 @@ XrResult layer_end_frame_impl(
     state->application_end_thread.store(
         state->application_end_thread_id, std::memory_order_relaxed);
     const auto application_end_now = std::chrono::steady_clock::now();
+    if (state->rever_game_motion) {
+        // Rever VR: the eye layout the game's vectors are mapped onto, before
+        // the releases below run.
+        note_rever_game_motion_views(*state, end_info);
+    }
     if (state->capture_at_end_frame) {
         // The bridged releases this frame left for here, copy and capture
         // with them, and the history captures of the native D3D12 ones;

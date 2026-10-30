@@ -231,6 +231,17 @@ enum class BridgeFlightOperation : std::uint32_t {
     // swapchain, b microseconds waited, c the limit in microseconds << 32 |
     // the image index. Nothing is written for a capture whose slot was free.
     history_capture_wait,
+    // Rever VR: the game's own motion vectors fed to the game-motion path
+    // (OFXR_REVER_GAME_MOTION=1; nothing is written without it). result 1
+    // Rever's channel mapped (a pid, b width<<32|height, c generation), 5 its
+    // motion textures opened (same fields), 6 the channel not there (yet), 7
+    // the channel belongs to another process (a its pid, b ours), 2
+    // the eye layout (a 1 array slices, 2 side by side, 0 unsupported; b the
+    // swapchain; c output width<<32|motion width), 3 the first publication
+    // (a streams, b registry publications, c snapshot failures), 4 every five
+    // seconds (a published, b frames with nothing new, c busy<<32|failures);
+    // a negative result is a failing call's HRESULT with the stage in a.
+    rever_game_motion,
 };
 
 struct BridgeFlightToken {
