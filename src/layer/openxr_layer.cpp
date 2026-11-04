@@ -597,13 +597,19 @@ struct Dispatch {
     // its rate, gave a steady 55 and a synthetic for every one of them.
     bool inline_unless_pipelined{};
     // Rever VR: Rever Streamer's runtime. It shares inline_unless_pipelined
-    // but never takes the presenter for a one-thread frame loop
-    // (frame_loop_takes_presenter), as in V4642, where that clause was still
-    // Virtual Desktop's alone. On the presenter the D3D11 runtime-entry gate
-    // is held across each whole xrWaitFrame, and every swapchain call of the
-    // game waited behind it a full period: Alien: Isolation through Rever's
-    // 32-bit bridge at 3X and 120 Hz, each acquire, wait and release 8.3 ms,
-    // xrEndFrame 41 ms, 13 real frames a second (Rever VR, 2026-11-04).
+    // but a session left on the D3D11 interop never takes the presenter for a
+    // one-thread frame loop (frame_loop_takes_presenter), as in V4642, where
+    // that clause was still Virtual Desktop's alone. On the presenter the
+    // D3D11 runtime-entry gate is held across each whole xrWaitFrame, and
+    // every swapchain call of the game waited behind it a full period: Alien:
+    // Isolation through Rever's 32-bit bridge at 3X and 120 Hz, each acquire,
+    // wait and release 8.3 ms, xrEndFrame 41 ms, 13 real frames a second
+    // (Rever VR, 2026-11-04). A session the D3D11 bridge took over (the
+    // runtime's D3D12, REVER_XR_D3D12=1) has no gate and takes it as on
+    // Virtual Desktop: inline, the game's frame and the synthetics' cycles ran
+    // one after the other on its thread, and 10 ms of game in 8.3 ms slots
+    // cost three slots a real frame at 2X (41 real, 41 synthetic, 38 repeats
+    // a second at 120 Hz).
     bool rever_streamer_runtime{};
     XrVersion runtime_version{};
     std::string runtime_name;
@@ -14052,7 +14058,7 @@ struct InternalCycleResult {
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
     if (!state->dispatch->inline_unless_pipelined ||
-        state->dispatch->rever_streamer_runtime ||
+        (state->dispatch->rever_streamer_runtime && state->d3d11_device != nullptr) ||
         state->steamvr_presenter_start_requested ||
         (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
         return false;

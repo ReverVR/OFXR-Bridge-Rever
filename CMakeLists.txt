@@ -894,9 +894,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # that had the presenter and then hands its loop to another thread
         # gets back a presenter a pass-through stopped; Pimax OpenXR stays
         # inline; another runtime still goes by the bunched-pair measurement.
-        # Rever VR: Rever Streamer's runtime stays inline on either loop.
+        # Rever VR: Rever Streamer's runtime as Virtual Desktop on a D3D12
+        # session, inline on the D3D11 interop.
         foreach(shape
-                "rever;single" "rever;split"
+                "rever;single" "rever;split" "rever-d3d11;single"
                 "virtual-desktop;split" "virtual-desktop;split;paused"
                 "virtual-desktop;single" "virtual-desktop;single;paused"
                 "virtual-desktop;handoff"

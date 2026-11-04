@@ -111,8 +111,9 @@ int main(int argc, char** argv) {
     // pairs. "handoff", Virtual Desktop only: a
     // single-threaded session that had the presenter moves its loop to
     // another thread, and the presenter a pass-through stopped comes back.
-    // "rever" (Rever VR): Rever Streamer's runtime stays inline on either
-    // loop, decided by its name and never by the pairs.
+    // "rever" (Rever VR): Rever Streamer's runtime as Virtual Desktop on a
+    // D3D12 session (the D3D11 bridge's); "rever-d3d11", a session on the
+    // D3D11 interop: inline, never by the pairs.
     //
     const bool frame_loop_test = mode == "frame-loop";
     // "recorder": the flight recorder switched on, off and on again while a
@@ -127,7 +128,7 @@ int main(int argc, char** argv) {
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
-    else if (loop_runtime == "rever") g_runtime_name_override = "Rever Streamer";
+    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11") g_runtime_name_override = "Rever Streamer";
     else if (frame_loop_test) return 1;
     const std::string marker_mode =
         argc == 4 && !pause_test && !pipelined_pause_test && !overlay_test && !reload_test &&
@@ -140,6 +141,10 @@ int main(int argc, char** argv) {
     // The interop keeps the private rings; every D3D12 mode takes the
     // single-swapchain rings the shipped ini turns on.
     g_single_rings = mode != "d3d11";
+    if (frame_loop_test && loop_runtime == "rever-d3d11") {
+        g_d3d11_interop_mode = true;
+        g_single_rings = false;
+    }
     if (pacing_test) {
         g_paced_runtime = true;
         g_steamvr_runtime_mode = g_steamvr_presenter_mode = pacing_runtime == "steamvr";
@@ -652,7 +657,7 @@ int main(int argc, char** argv) {
                       << (start_paused ? " paused" : "") << ": presenter at frame "
                       << presenter_at << std::endl;
             const bool decided_by_shape = loop_runtime != "other";
-            const bool always_inline = loop_runtime == "rever";
+            const bool always_inline = loop_runtime == "rever-d3d11";
             if (!decided_by_shape && start_paused) return 1; // not a scenario
             if (decided_by_shape && !split_loop && !always_inline)
                 // Requested on the first generating frame, started by the next,
