@@ -23,6 +23,15 @@
 >   presenter held the D3D11 runtime-entry gate across a whole `xrWaitFrame`
 >   and every swapchain call of the game waited behind it (Titanfall 2 at 3X:
 >   2 fps; inline: 45 real at 90 Hz).
+> * `[ofxr] dynamic_frame_gen=1` (or `OFXR_DYNAMIC_FRAME_GEN=1`): the
+>   multiplier follows the game's own frame time, one step up when a frame
+>   no longer fits its display periods, one step down once it fits well in
+>   one fewer, at most every 3 s. `frame_multiplier` is the ceiling, never
+>   below 3: 2X / 3X, or 2X / 3X / 4X when it says 4.
+> * `OFXR_REVER_GAME_MOTION=1`: a D3D11 game's own motion vectors and depth,
+>   published by Rever's bridge on its own channel, feed OFXR's game-motion
+>   path as the game's DLSS guides would (text log in
+>   `ReverVR\ofxr_game_motion.log`).
 > * Build number V5771, so its `RuntimeLayer\v5771` folder never collides with
 >   the official build.
 >
