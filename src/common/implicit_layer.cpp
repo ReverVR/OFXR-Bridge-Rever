@@ -408,6 +408,23 @@ bool read_presenter_from_start(
     }
 }
 
+bool read_dynamic_frame_gen(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_DYNAMIC_FRAME_GEN")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"dynamic_frame_gen", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 std::vector<std::wstring> read_excluded_processes(
     const std::filesystem::path& module_directory) noexcept {
     std::vector<std::wstring> names;

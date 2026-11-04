@@ -231,6 +231,16 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_presenter_from_start(
     const std::filesystem::path& module_directory) noexcept;
 
+// Rever VR: `[ofxr] dynamic_frame_gen` (or OFXR_DYNAMIC_FRAME_GEN=1 in the
+// game's environment): on a session that can take several shapes, the
+// multiplier is chosen from how long the application takes for a frame
+// instead of from frame_multiplier - one more frame between game frames
+// when it cannot make its periods, one fewer once it fits well in them.
+// frame_multiplier is then the ceiling, never below 3: 2X / 3X as before,
+// 2X / 3X / 4X when it says 4. Off unless set to 1. Read at xrCreateSession.
+[[nodiscard]] bool read_dynamic_frame_gen(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] excluded_processes`: executable names, separated by ';', in which
 // the layer declines to load at negotiation. Absent, it is Pimax Home: a
 // home environment is an OpenXR application like any other, takes the

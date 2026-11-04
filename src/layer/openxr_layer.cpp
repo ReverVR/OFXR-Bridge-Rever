@@ -1165,6 +1165,15 @@ struct SessionState {
     bool triple_switchable{};
     // The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point triple_poll_at{};
+    // Rever VR's dynamic multiplier (read_dynamic_frame_gen): the shape
+    // follows the application's own frame time - from its xrWaitFrame
+    // returning to its xrEndFrame - not the tray's ini. The return is
+    // stamped by the wait thread; the average and the hold belong to the
+    // xrEndFrame thread.
+    bool dynamic_frame_gen{};
+    std::atomic<std::int64_t> dynamic_wait_returned_ns{};
+    double dynamic_frame_ns{};
+    std::chrono::steady_clock::time_point dynamic_hold_until{};
     // The flight log's vram_usage records. The adapter is found from the
     // first device the session has; what it reports is the process's use of
     // that adapter, whichever device made the allocation.
@@ -5203,6 +5212,8 @@ XrResult layer_create_session_impl(
     const std::uint32_t multiplier_requested =
         xrfg::implicit_layer::read_frame_multiplier(current_layer_directory());
     const bool triple_requested = multiplier_requested > 2;
+    state->dynamic_frame_gen =
+        xrfg::implicit_layer::read_dynamic_frame_gen(current_layer_directory());
     state->single_swapchain_rings =
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->capture_at_end_frame =
@@ -5480,9 +5491,15 @@ XrResult layer_create_session_impl(
     const bool spare_slots_free = state->single_swapchain_rings &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         !state->panel_corrections_off;
-    state->synthetic_ring_slots = spare_slots_free || frames_at_start > 3
+    // Rever VR's dynamic multiplier takes from the start the ring its
+    // ceiling fits in, so a session that starts at a pair can still go up.
+    const bool dynamic_ring = state->dynamic_frame_gen && triple_binding &&
+        !state->panel_corrections_off;
+    state->synthetic_ring_slots =
+        spare_slots_free || frames_at_start > 3 ||
+                (dynamic_ring && multiplier_requested > 3)
         ? kSyntheticSlotCountQuad
-        : (state->deep_pipeline || frames_at_start > 2)
+        : (state->deep_pipeline || frames_at_start > 2 || dynamic_ring)
             ? kSyntheticSlotCountDeep
             : kSyntheticSlotCountShallow;
     state->triple_switchable = triple_binding &&
@@ -14552,15 +14569,64 @@ void apply_live_frame_multiplier(
         if (!state->triple_switchable) {
             return;
         }
+        const auto now = std::chrono::steady_clock::now();
+        // Rever VR's dynamic multiplier: the application's frame time,
+        // averaged over about a dozen frames (its pace is the shape's, its
+        // frame time is what it can do)
+        if (state->dynamic_frame_gen) {
+            const std::int64_t returned =
+                state->dynamic_wait_returned_ns.load(std::memory_order_relaxed);
+            const std::int64_t frame_ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count() -
+                returned;
+            if (returned > 0 && frame_ns > 0 && frame_ns < 500'000'000) {
+                state->dynamic_frame_ns = state->dynamic_frame_ns <= 0.0
+                    ? static_cast<double>(frame_ns)
+                    : state->dynamic_frame_ns * 0.92 + static_cast<double>(frame_ns) * 0.08;
+            }
+        }
         // The ini is rewritten by the tray; a read every quarter second is
         // cheap and nothing here is urgent.
-        const auto now = std::chrono::steady_clock::now();
         if (now < state->triple_poll_at) {
             return;
         }
         state->triple_poll_at = now + std::chrono::milliseconds(250);
-        const std::uint32_t requested =
+        std::uint32_t requested =
             xrfg::implicit_layer::read_frame_multiplier(current_layer_directory());
+        if (state->dynamic_frame_gen) {
+            // One more frame between game frames once a frame takes more
+            // than the periods the shape gives it (it would miss its slot),
+            // one fewer only when it fits well in one period less (a margin
+            // against flapping), never sooner than 3 s after a change. The
+            // ini's multiplier is the ceiling, never below 3.
+            const std::uint32_t ceiling = std::min(
+                std::max(requested, 3U), state->live_multiplier_ceiling);
+            const std::uint32_t current = state->frames_per_application_frame;
+            requested = std::min(current, ceiling);
+            const double period =
+                static_cast<double>(state->minimum_runtime_display_period);
+            if (period > 0.0 && state->dynamic_frame_ns > 0.0 &&
+                now >= state->dynamic_hold_until) {
+                const double periods = state->dynamic_frame_ns / period;
+                if (requested < ceiling && periods > requested + 0.05) {
+                    ++requested;
+                } else if (requested > 2U && periods < requested - 1.3) {
+                    --requested;
+                }
+                if (requested != current) {
+                    state->dynamic_hold_until = now + std::chrono::seconds(3);
+                    // 701: Rever VR's dynamic shape. a the new frames per
+                    // application frame, b the frame time in microseconds,
+                    // c the display period in microseconds
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        701,
+                        requested,
+                        static_cast<std::uint64_t>(state->dynamic_frame_ns / 1000.0),
+                        static_cast<std::uint64_t>(period / 1000.0));
+                }
+            }
+        }
         // What the ring fits (V558): a session made with two synthetic slots
         // takes 3X but not 4X. Clamped, and the fixed marker held while the
         // clamp is in force, so the tray can say a restart is needed.
@@ -16070,6 +16136,16 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_wait_frame(
     const XrResult result = guard_c_api_boundary([&] {
         return layer_wait_frame_impl(session, wait_info, frame_state);
     });
+    // Rever VR's dynamic multiplier: the application's frame starts here
+    if (XR_SUCCEEDED(result)) {
+        if (const auto state = find_session(session); state && state->dynamic_frame_gen) {
+            state->dynamic_wait_returned_ns.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count(),
+                std::memory_order_relaxed);
+        }
+    }
     xrfg::bridge_flight_logger().end(
         token,
         xrfg::BridgeFlightOperation::application_wait_frame,
