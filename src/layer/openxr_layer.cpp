@@ -606,11 +606,14 @@ struct Dispatch {
     // wait and release 8.3 ms, xrEndFrame 41 ms, 13 real frames a second
     // (Rever VR, 2026-11-04). A session the D3D11 bridge took over (the
     // runtime's D3D12, REVER_XR_D3D12=1) has no gate and takes it as on
-    // Virtual Desktop: inline, the game's frame and the synthetics' cycles ran
-    // one after the other on its thread, and 10 ms of game in 8.3 ms slots
-    // cost three slots a real frame at 2X (41 real, 41 synthetic, 38 repeats
-    // a second at 120 Hz).
+    // Virtual Desktop only with OFXR_REVER_PRESENTER=1 (rever_presenter).
+    // Inline, the game's frame and the synthetics' cycles run one after the
+    // other on its thread (Alien at 2X and 120 Hz: 41 real, 41 synthetic, 38
+    // repeats a second, "bien"); on the presenter the synthesis ran beside
+    // the game and a GPU already full judders (55.8 synthetic, 35.3 real,
+    // 17.4 repeats a second, "traquetea").
     bool rever_streamer_runtime{};
+    bool rever_presenter{};
     XrVersion runtime_version{};
     std::string runtime_name;
 };
@@ -5044,6 +5047,10 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->rever_streamer_runtime =
                 std::string_view(dispatch->runtime_name).find(
                     "Rever Streamer") != std::string_view::npos;
+            char presenter[8]{};
+            dispatch->rever_presenter = dispatch->rever_streamer_runtime &&
+                GetEnvironmentVariableA("OFXR_REVER_PRESENTER", presenter, sizeof presenter) > 0 &&
+                presenter[0] == '1';
             dispatch->inline_unless_pipelined =
                 dispatch->virtual_desktop_runtime ||
                 std::string_view(dispatch->runtime_name).find(
@@ -14058,7 +14065,8 @@ struct InternalCycleResult {
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
     if (!state->dispatch->inline_unless_pipelined ||
-        (state->dispatch->rever_streamer_runtime && state->d3d11_device != nullptr) ||
+        (state->dispatch->rever_streamer_runtime &&
+         (state->d3d11_device != nullptr || !state->dispatch->rever_presenter)) ||
         state->steamvr_presenter_start_requested ||
         (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
         return false;

@@ -111,9 +111,10 @@ int main(int argc, char** argv) {
     // pairs. "handoff", Virtual Desktop only: a
     // single-threaded session that had the presenter moves its loop to
     // another thread, and the presenter a pass-through stopped comes back.
-    // "rever" (Rever VR): Rever Streamer's runtime as Virtual Desktop on a
-    // D3D12 session (the D3D11 bridge's); "rever-d3d11", a session on the
-    // D3D11 interop: inline, never by the pairs.
+    // "rever" (Rever VR): Rever Streamer's runtime inline on a D3D12 session
+    // (the D3D11 bridge's) and, "rever-d3d11", on the D3D11 interop - never by
+    // the pairs; "rever-presenter", OFXR_REVER_PRESENTER=1: as Virtual
+    // Desktop on a D3D12 session.
     //
     const bool frame_loop_test = mode == "frame-loop";
     // "recorder": the flight recorder switched on, off and on again while a
@@ -128,8 +129,10 @@ int main(int argc, char** argv) {
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
-    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11") g_runtime_name_override = "Rever Streamer";
+    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11" || loop_runtime == "rever-presenter")
+        g_runtime_name_override = "Rever Streamer";
     else if (frame_loop_test) return 1;
+    if (loop_runtime == "rever-presenter") SetEnvironmentVariableA("OFXR_REVER_PRESENTER", "1");
     const std::string marker_mode =
         argc == 4 && !pause_test && !pipelined_pause_test && !overlay_test && !reload_test &&
         !frame_loop_test ? argv[3] : "";
@@ -657,7 +660,7 @@ int main(int argc, char** argv) {
                       << (start_paused ? " paused" : "") << ": presenter at frame "
                       << presenter_at << std::endl;
             const bool decided_by_shape = loop_runtime != "other";
-            const bool always_inline = loop_runtime == "rever-d3d11";
+            const bool always_inline = loop_runtime == "rever" || loop_runtime == "rever-d3d11";
             if (!decided_by_shape && start_paused) return 1; // not a scenario
             if (decided_by_shape && !split_loop && !always_inline)
                 // Requested on the first generating frame, started by the next,
