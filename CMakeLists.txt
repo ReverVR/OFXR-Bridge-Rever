@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.577.0 LANGUAGES CXX)
+# Rever VR's fork of v0.2.14.3 (V577): its own build number, so its RuntimeLayer\v5771 folder
+# never collides with the official v577 one when both are installed.
+project(XRFrameGenerationBridge VERSION 0.5771.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
