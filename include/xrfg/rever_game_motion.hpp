@@ -121,6 +121,15 @@ struct ReverGameMotionPlan {
 // absent: the producer's key only.
 [[nodiscard]] std::uint64_t rever_game_motion_handed_key() noexcept;
 
+// A producer's block is this process's own (Rever Inject inside the game) or
+// its parent's: Alien's producer lives in the 32-bit game, OFXR in the 64-bit
+// bridge host the game started (test 34, 2026-11-05: "channel foreign", the
+// vectors never taken). Any other process's block is another game's.
+[[nodiscard]] bool rever_game_motion_ours(std::uint32_t block_pid, std::uint32_t own_pid,
+                                          std::uint32_t parent_pid) noexcept;
+// The process that started this one (0 when it cannot be told).
+[[nodiscard]] std::uint32_t rever_game_motion_parent_pid() noexcept;
+
 class ReverGameMotionSource final {
 public:
     // `channel_name`: null for Rever's Local\ReverVR_DLSS_SR_Inputs; tests

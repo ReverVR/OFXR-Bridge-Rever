@@ -179,6 +179,13 @@ void alien_halves() {
     require(xrfg::rever_game_motion_handed_key() == 1, "no layer above: the producer's key");
     SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", L"2");
     require(xrfg::rever_game_motion_handed_key() == 2, "Rever's layer above: key 2");
+    // the producer in the game that started this process (Alien's 32-bit game, OFXR in the 64-bit bridge host)
+    require(xrfg::rever_game_motion_ours(5, 5, 9) && xrfg::rever_game_motion_ours(9, 5, 9),
+            "this process's block and its parent's are ours");
+    require(!xrfg::rever_game_motion_ours(7, 5, 9) && !xrfg::rever_game_motion_ours(0, 5, 0),
+            "any other process's block is another game's");
+    const std::uint32_t parent = xrfg::rever_game_motion_parent_pid();
+    require(parent != 0 && parent != GetCurrentProcessId(), "the parent process is told");
     SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", nullptr);
 }
 

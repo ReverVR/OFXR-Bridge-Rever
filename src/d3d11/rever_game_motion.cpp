@@ -5,6 +5,7 @@
 
 #include <windows.h>
 #include <share.h>
+#include <tlhelp32.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -235,6 +236,28 @@ std::array<ReverGameMotionView, 2> rever_game_motion_halves(
     return halves;
 }
 
+bool rever_game_motion_ours(std::uint32_t block_pid, std::uint32_t own_pid,
+                            std::uint32_t parent_pid) noexcept {
+    return block_pid != 0 && (block_pid == own_pid || block_pid == parent_pid);
+}
+
+std::uint32_t rever_game_motion_parent_pid() noexcept {
+    const DWORD own = GetCurrentProcessId();
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    std::uint32_t parent = 0;
+    for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry)) {
+        if (entry.th32ProcessID == own) {
+            parent = entry.th32ParentProcessID;
+            break;
+        }
+    }
+    CloseHandle(snapshot);
+    return parent;
+}
+
 std::uint64_t rever_game_motion_handed_key() noexcept {
     wchar_t value[8] = {};
     const DWORD length =
@@ -276,6 +299,9 @@ struct ReverGameMotionSource::Impl {
     bool foreign_logged{};
     // The key Rever's layer above hands the textures on with (1: none above)
     const std::uint64_t handed_key{rever_game_motion_handed_key()};
+    // The process that started this one: Alien's 32-bit game, whose producer
+    // writes the channel, when OFXR runs in Rever's 64-bit bridge host
+    const std::uint32_t parent_pid{rever_game_motion_parent_pid()};
 
     // The application's stereo projection, from its xrEndFrame.
     bool views_valid{};
@@ -489,12 +515,12 @@ struct ReverGameMotionSource::Impl {
         }
         const LONG generation = block->generation;
         const std::uint32_t pid = block->pid;
-        if (pid != GetCurrentProcessId()) {
+        if (!rever_game_motion_ours(pid, GetCurrentProcessId(), parent_pid)) {
             // The channel's name is per Windows session, not per process: a
             // block from another game is never ours to take frames from.
             if (!foreign_logged) {
                 foreign_logged = true;
-                log_event(kEventChannelForeign, pid, GetCurrentProcessId());
+                log_event(kEventChannelForeign, pid, GetCurrentProcessId(), parent_pid);
             }
             return false;
         }
