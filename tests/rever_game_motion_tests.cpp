@@ -150,6 +150,38 @@ void plan_comparison() {
     require(!xrfg::same_rever_game_motion_plan(a, c), "a new render size is a new plan");
 }
 
+// Alien Isolation: one 7096x3548 swapchain (Rever's layer's DLSS output), the eyes unequal and cut to their lenses
+// inside their halves; the producer's vectors cover each whole half at 2838x2838
+void alien_halves() {
+    const Views submitted{{
+        {kSwapchain, 0, 41, 90, 3283, 3184},
+        {kSwapchain, 0, 3589, 85, 3286, 3180},
+    }};
+    require(xrfg::plan_rever_game_motion(submitted, 7096, 3548, 1, 2838, 2838).layout ==
+                xrfg::ReverGameMotionLayout::unsupported,
+            "Alien's submitted eyes plan nothing by themselves");
+    const Views halves = xrfg::rever_game_motion_halves(submitted, 7096, 3548);
+    require(halves[0].swapchain == kSwapchain && halves[0].x == 0 && halves[0].y == 0 &&
+                halves[0].width == 3548 && halves[0].height == 3548 && halves[1].x == 3548 &&
+                halves[1].width == 3548 && halves[1].height == 3548,
+            "the two halves of the swapchain, view 0 on the left");
+    const auto plan = xrfg::plan_rever_game_motion(halves, 7096, 3548, 1, 2838, 2838);
+    require(plan.layout == xrfg::ReverGameMotionLayout::side_by_side && plan.stream_count == 1,
+            "the halves plan side by side");
+    const auto& stream = plan.streams[0];
+    require(stream.producer_eye[0] == 0 && stream.producer_eye[1] == 1 && stream.output_x == 0 &&
+                stream.output_width == 7096 && stream.output_height == 3548 &&
+                stream.motion_width == 5676 && stream.motion_height == 2838,
+            "the whole image over both producer halves");
+    const Views odd = xrfg::rever_game_motion_halves(submitted, 7095, 3548);
+    require(odd[0].x == 41 && odd[1].width == 3286, "an odd width keeps the views");
+    SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", nullptr);
+    require(xrfg::rever_game_motion_handed_key() == 1, "no layer above: the producer's key");
+    SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", L"2");
+    require(xrfg::rever_game_motion_handed_key() == 2, "Rever's layer above: key 2");
+    SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", nullptr);
+}
+
 void environment_switch() {
     SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION", nullptr);
     require(!xrfg::rever_game_motion_requested(), "absent: off");
@@ -269,18 +301,17 @@ void producer_channel_end_to_end() {
         require_hr(depth[eye].As(&depth_keyed[eye]), "depth keyed mutex");
     }
     float base = 1.0F;
-    const auto produce = [&](bool release_to_consumer) {
+    // the key the producer hands its textures on with: 0 kept, 1 the consumer's, 2 as Rever's layer hands them on
+    const auto produce = [&](UINT64 key) {
         for (std::uint32_t eye = 0; eye < 2; ++eye) {
             require(keyed[eye]->AcquireSync(0, 1000) == S_OK, "producer acquire");
             const float value[4] = {base + 2.0F * static_cast<float>(eye),
                                     base + 2.0F * static_cast<float>(eye) + 1.0F, 0.0F, 0.0F};
             context->ClearRenderTargetView(target[eye].Get(), value);
             // Kept (key 0): the sequence moves but the consumer cannot take it.
-            require_hr(keyed[eye]->ReleaseSync(release_to_consumer ? 1 : 0),
-                       "producer release");
+            require_hr(keyed[eye]->ReleaseSync(key), "producer release");
             require(depth_keyed[eye]->AcquireSync(0, 1000) == S_OK, "producer depth acquire");
-            require_hr(depth_keyed[eye]->ReleaseSync(release_to_consumer ? 1 : 0),
-                       "producer depth release");
+            require_hr(depth_keyed[eye]->ReleaseSync(key), "producer depth release");
             InterlockedIncrement(&block->eyes[eye].seq);
         }
         context->Flush();
@@ -316,12 +347,12 @@ void producer_channel_end_to_end() {
         };
         release();
         require(published() == 0, "nothing written yet: nothing published");
-        produce(false);
+        produce(0);
         release();
         require(published() == 0, "producer kept the textures: nothing published");
         const std::uint32_t own_pid = block->pid;
         block->pid = own_pid ^ 0x40000U;
-        produce(true);
+        produce(1);
         release();
         require(published() == 0, "another process's block is never taken");
         block->pid = own_pid;
@@ -418,13 +449,52 @@ void producer_channel_end_to_end() {
         readback->Unmap(0, nullptr);
 
         base = 5.0F;
-        produce(true);
+        produce(1);
         release();
         require(published() == 2, "the next frame publishes again");
         set = xrfg::resolve_dlss_motion_vectors(output.Get(), queue.Get());
         require(set && set->eyes[0]->serial == 2 && set->eyes[0]->previous_serial == 1 &&
                     set->eyes[0]->epoch == first->epoch && !set->eyes[0]->reset,
                 "consecutive publications chain for the game-motion pair");
+    }
+    {
+        // Alien Isolation (KB ALI-050): version 2, each eye's vectors its whole half; the eyes submitted unequal and cut
+        // to their lenses inside their halves; Rever's layer above reads them first and hands them on with key 2
+        block->version = 2;
+        block->flags = 2;
+        SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", L"2");
+        xrfg::ReverGameMotionSource source(channel);
+        SetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", nullptr);
+        constexpr auto eye_size = static_cast<std::int32_t>(kEye);
+        source.set_views(true, Views{{
+            {kSwapchain, 0, 1, 2, eye_size - 3, eye_size - 4},
+            {kSwapchain, 0, eye_size + 2, 1, eye_size - 4, eye_size - 2},
+        }});
+        const auto release = [&] {
+            source.publish_for_release(kSwapchain, output.Get(), device.Get(), context.Get(),
+                                       device12.Get(), queue.Get());
+        };
+        const std::uint64_t before = published();
+        base = 9.0F;
+        produce(2);
+        release();
+        require(published() == before + 1, "version 2 handed on with key 2 publishes the side-by-side halves");
+        for (std::uint32_t eye = 0; eye < 2; ++eye) {
+            require(keyed[eye]->AcquireSync(0, 0) == S_OK, "version 2: the vectors handed back to the producer");
+            require(depth_keyed[eye]->AcquireSync(0, 0) == S_OK, "version 2: the depth handed back to the producer");
+            require_hr(keyed[eye]->ReleaseSync(0), "vectors kept");
+            require_hr(depth_keyed[eye]->ReleaseSync(0), "depth kept");
+        }
+        produce(1);
+        release();
+        require(published() == before + 2, "a frame the layer above did not read: the producer's key 1 taken");
+        const auto set = xrfg::resolve_dlss_motion_vectors(output.Get(), queue.Get());
+        require(set && set->eye_count == 1 && set->eyes[0] && set->eyes[0]->output_x == 0 &&
+                    set->eyes[0]->output_width == kEye * 2 && set->eyes[0]->output_height == kEye &&
+                    set->eyes[0]->motion_width == kRender * 2 && set->eyes[0]->motion_height == kRender,
+                "version 2: the whole image over both eyes' whole halves");
+        block->version = 1;
+        block->flags = 0;
     }
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_disabled_dlss_motion_vector_resources();
@@ -446,6 +516,7 @@ int main() {
         array_slices();
         unsupported_shapes();
         plan_comparison();
+        alien_halves();
         environment_switch();
         producer_channel_end_to_end();
     } catch (const std::exception& error) {

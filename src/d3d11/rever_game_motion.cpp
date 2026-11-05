@@ -42,6 +42,10 @@ static_assert(sizeof(ReverInputsBlock) == 64);
 
 constexpr std::uint32_t kReverInputsMagic = 0x49535652;  // "RVSI"
 constexpr std::uint32_t kReverInputsVersion = 1;
+// Alien's producer (Rever's 32-bit bridge): version 1's layout, flag 2 - each
+// eye's textures its whole half of the side-by-side image
+constexpr std::uint32_t kReverInputsVersionHalves = 2;
+constexpr std::uint32_t kFlagEyeHalves = 2;
 constexpr wchar_t kReverInputsName[] = L"Local\\ReverVR_DLSS_SR_Inputs";
 constexpr std::size_t kListCount = 4;
 // "RVGM" in the high half keeps these stream ids apart from a DLSS
@@ -210,6 +214,34 @@ ReverGameMotionPlan plan_rever_game_motion(
     return plan;
 }
 
+std::array<ReverGameMotionView, 2> rever_game_motion_halves(
+    const std::array<ReverGameMotionView, 2>& views,
+    std::uint32_t swapchain_width,
+    std::uint32_t swapchain_height) noexcept {
+    if (swapchain_width < 2 || swapchain_width % 2 != 0 || swapchain_height == 0 ||
+        swapchain_width > 0x7FFFFFFFU || swapchain_height > 0x7FFFFFFFU) {
+        return views;
+    }
+    const auto half = static_cast<std::int32_t>(swapchain_width / 2U);
+    const auto height = static_cast<std::int32_t>(swapchain_height);
+    std::array<ReverGameMotionView, 2> halves = views;
+    for (std::uint32_t eye = 0; eye < 2; ++eye) {
+        halves[eye].array_index = 0;
+        halves[eye].x = static_cast<std::int32_t>(eye) * half;
+        halves[eye].y = 0;
+        halves[eye].width = half;
+        halves[eye].height = height;
+    }
+    return halves;
+}
+
+std::uint64_t rever_game_motion_handed_key() noexcept {
+    wchar_t value[8] = {};
+    const DWORD length =
+        GetEnvironmentVariableW(L"OFXR_REVER_GAME_MOTION_KEY", value, 8);
+    return length == 1 && value[0] == L'2' ? 2U : 1U;
+}
+
 bool same_rever_game_motion_plan(
     const ReverGameMotionPlan& left,
     const ReverGameMotionPlan& right) noexcept {
@@ -242,6 +274,8 @@ struct ReverGameMotionSource::Impl {
     bool disabled{};
     std::wstring channel_name{kReverInputsName};
     bool foreign_logged{};
+    // The key Rever's layer above hands the textures on with (1: none above)
+    const std::uint64_t handed_key{rever_game_motion_handed_key()};
 
     // The application's stereo projection, from its xrEndFrame.
     bool views_valid{};
@@ -440,7 +474,8 @@ struct ReverGameMotionSource::Impl {
             block = static_cast<const ReverInputsBlock*>(
                 MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(ReverInputsBlock)));
             if (block == nullptr || block->magic != kReverInputsMagic ||
-                block->version != kReverInputsVersion) {
+                (block->version != kReverInputsVersion &&
+                    block->version != kReverInputsVersionHalves)) {
                 const std::uint64_t magic = block != nullptr ? block->magic : 0;
                 const std::uint64_t version = block != nullptr ? block->version : 0;
                 close_channel();
@@ -601,7 +636,13 @@ struct ReverGameMotionSource::Impl {
         const std::uint32_t render_height = std::min({block->height,
             producer_height[0], producer_height[1]});
         const D3D12_RESOURCE_DESC output_description = output->GetDesc();
-        const ReverGameMotionPlan next = plan_rever_game_motion(views,
+        const bool eye_halves = block->version == kReverInputsVersionHalves &&
+            (block->flags & kFlagEyeHalves) != 0;
+        const ReverGameMotionPlan next = plan_rever_game_motion(
+            eye_halves ? rever_game_motion_halves(views,
+                         static_cast<std::uint32_t>(output_description.Width),
+                         output_description.Height)
+                   : views,
             static_cast<std::uint32_t>(output_description.Width),
             output_description.Height, output_description.DepthOrArraySize,
             render_width, render_height);
@@ -645,10 +686,17 @@ struct ReverGameMotionSource::Impl {
         // the game's key, as it left them)
         IDXGIKeyedMutex* const frame_mutexes[4] = {producer_mutex[0].Get(), producer_mutex[1].Get(),
                                                    depth_mutex[0].Get(), depth_mutex[1].Get()};
+        // with Rever's layer above, its hand-on key first, then the producer's
+        // (a frame the layer did not read)
         int held = 0;
-        while (held < 4 && frame_mutexes[held]->AcquireSync(1, 0) == S_OK) ++held;
+        for (const std::uint64_t key : {handed_key, std::uint64_t{1}}) {
+            held = 0;
+            while (held < 4 && frame_mutexes[held]->AcquireSync(key, 0) == S_OK) ++held;
+            if (held == 4) break;
+            for (int index = 0; index < held; ++index) frame_mutexes[index]->ReleaseSync(key);
+            if (key == 1) break;
+        }
         if (held < 4) {
-            for (int index = 0; index < held; ++index) frame_mutexes[index]->ReleaseSync(1);
             ++busy;
             return;
         }

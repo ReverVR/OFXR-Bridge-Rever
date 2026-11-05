@@ -11,7 +11,9 @@
 // motion-vector texture by name (R16G16_FLOAT, render pixels, current ->
 // previous, the DLSS convention at scale 1) guarded by a keyed mutex: the
 // producer releases key 1 once written, a consumer takes key 1 without
-// blocking, copies, and gives key 0 back.
+// blocking, copies, and gives key 0 back. With Rever's layer above OFXR
+// reading them first for its DLSS (Alien Isolation), the layer hands them on
+// with key 2 and OFXR takes that one (rever_game_motion_handed_key).
 //
 // On a D3D11 session (bridged or through the D3D11 interop) the layer holds
 // the game's D3D11 device. The source copies each eye's vectors on that
@@ -101,6 +103,23 @@ struct ReverGameMotionPlan {
 [[nodiscard]] bool same_rever_game_motion_plan(
     const ReverGameMotionPlan& left,
     const ReverGameMotionPlan& right) noexcept;
+
+// Rever VR, Alien Isolation (the channel's version 2 with its flag 2, KB
+// ALI-050): each eye's vectors cover the whole half of the side-by-side image
+// the game drew, not the eye's submitted rectangle - MotherVR's two eyes are a
+// few pixels apart in size and cut to their lenses inside their halves. The
+// views to plan with: the swapchain's two halves (view 0 the left), as Lone
+// Echo II's; the views as they are when the width is odd.
+[[nodiscard]] std::array<ReverGameMotionView, 2> rever_game_motion_halves(
+    const std::array<ReverGameMotionView, 2>& views,
+    std::uint32_t swapchain_width,
+    std::uint32_t swapchain_height) noexcept;
+
+// Read when a source is made: OFXR_REVER_GAME_MOTION_KEY=2 - Rever's layer
+// above OFXR reads the vectors first (its own DLSS) and hands them on with key
+// 2; a frame it did not read still comes with the producer's key 1. 1 when
+// absent: the producer's key only.
+[[nodiscard]] std::uint64_t rever_game_motion_handed_key() noexcept;
 
 class ReverGameMotionSource final {
 public:
