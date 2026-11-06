@@ -1202,6 +1202,9 @@ struct SessionState {
     xrfg::TurnBrake turn_brake{};
     std::uint64_t turn_brake_engagements{};
     std::uint64_t turn_brake_frames{};
+    // The tuning last written to the flight log (707 / 708, KB ALI-082): none yet.
+    std::uint64_t turn_brake_tuning_logged{~0ULL};
+    std::uint64_t gpu_tuning_logged{~0ULL};
     // Rever VR's GPU-aware dynamic multiplier (xrfg/gpu_aware_multiplier.hpp, KB ALI-079): the live key,
     // the real frames and the presenter's late synthetics a second at a time. The late count is the
     // presenter thread's (400 / 401), taken by the xrEndFrame thread at each poll.
@@ -14703,8 +14706,28 @@ void poll_turn_brake(SessionState& state) noexcept {
         state.turn_brake_poll_at = now + std::chrono::milliseconds(250);
         const auto directory = current_layer_directory();
         state.turn_brake_enabled = xrfg::implicit_layer::read_turn_brake(directory);
-        state.turn_brake.threshold_deg_per_s =
-            static_cast<float>(xrfg::implicit_layer::read_turn_brake_deg(directory));
+        const std::uint32_t degrees = xrfg::implicit_layer::read_turn_brake_deg(directory);
+        const std::uint32_t hold_ms = xrfg::implicit_layer::read_turn_brake_hold_ms(directory);
+        const std::uint32_t release = xrfg::implicit_layer::read_turn_brake_release(directory);
+        state.turn_brake.threshold_deg_per_s = static_cast<float>(degrees);
+        // KB ALI-082: the hold and the release, live (150 ms and 60 % unless set: cb142461's)
+        state.turn_brake.hold_ns = static_cast<std::int64_t>(hold_ms) * 1'000'000;
+        state.turn_brake.release_fraction = static_cast<float>(release) / 100.0F;
+        const std::uint64_t tuning = (state.turn_brake_enabled ? 1ULL : 0ULL) |
+            (static_cast<std::uint64_t>(degrees) << 1) | (static_cast<std::uint64_t>(hold_ms) << 12) |
+            (static_cast<std::uint64_t>(release) << 24);
+        if (tuning != state.turn_brake_tuning_logged) {
+            state.turn_brake_tuning_logged = tuning;
+            // 707: Rever VR's turn brake tuning, at the first poll and at each change. a 1 on / 0 off,
+            // b the threshold in degrees a second, c the hold in ms x 100 + the release in percent
+            // (15060: 150 ms, 60 %)
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                707,
+                state.turn_brake_enabled ? 1u : 0u,
+                degrees,
+                static_cast<std::uint64_t>(hold_ms) * 100U + release);
+        }
     } catch (...) {
     }
 }
@@ -14713,7 +14736,7 @@ void poll_turn_brake(SessionState& state) noexcept {
 // and this one's (the first projection layer's first view, in one space), the hysteresis of
 // xrfg::TurnBrake. Held, the frame is primed instead of paired: its history kept, nothing invented,
 // the presenter (or the runtime, inline) showing it again in the synthetic's slots, turned by the
-// headset. Flight log 704 at each change.
+// headset. Flight log 706 at each change.
 bool update_turn_brake(
     SessionState& state,
     const ProjectionSnapshot& previous,
@@ -14740,11 +14763,12 @@ bool update_turn_brake(
         if (engaged) {
             ++state.turn_brake_engagements;
         }
-        // 704: Rever VR's turn brake. a 1 on / 0 off, b the head's smoothed speed in degrees a
-        // second, c the threshold in degrees a second.
+        // 706: Rever VR's turn brake. a 1 on / 0 off, b the head's smoothed speed in degrees a
+        // second, c the threshold in degrees a second. (cb142461 wrote it as 704, which the
+        // single-swapchain rings' acquire / copy failures had: KB ALI-082.)
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::presenter_transition,
-            704,
+            706,
             engaged ? 1u : 0u,
             static_cast<std::uint64_t>(std::max(0.0F, state.turn_brake.smoothed_deg_per_s)),
             static_cast<std::uint64_t>(state.turn_brake.threshold_deg_per_s));
@@ -14789,6 +14813,24 @@ void apply_live_frame_multiplier(
         std::uint32_t requested =
             xrfg::implicit_layer::read_frame_multiplier(current_layer_directory());
         state->gpu_aware = xrfg::implicit_layer::read_gpu_aware(current_layer_directory());
+        {
+            // KB ALI-082: the margin, live (95 % unless set: cb142461's)
+            const std::uint32_t margin = xrfg::implicit_layer::read_gpu_margin(current_layer_directory());
+            state->gpu_aware_multiplier.set_rate_margin(static_cast<double>(margin) / 100.0);
+            const std::uint64_t tuning =
+                (state->gpu_aware ? 1ULL : 0ULL) | (static_cast<std::uint64_t>(margin) << 1);
+            if (tuning != state->gpu_tuning_logged) {
+                state->gpu_tuning_logged = tuning;
+                // 708: Rever VR's GPU-aware tuning, at the first poll and at each change. a 1 on /
+                // 0 off, b the margin in percent
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    708,
+                    state->gpu_aware ? 1u : 0u,
+                    margin,
+                    0);
+            }
+        }
         state->gpu_aware_multiplier.count_late(
             state->gpu_late_synthetics.exchange(0, std::memory_order_relaxed));
         const std::int64_t now_ns =

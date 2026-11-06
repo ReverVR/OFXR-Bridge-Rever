@@ -81,6 +81,67 @@ int main() {
     strict.threshold_deg_per_s = 300.0F;
     expect(!strict.update(200.0F, kFrame), "200 deg/s with a 300 threshold stays off");
 
+    // KB ALI-082: the defaults are cb142461's (the Quest's), and the Steam Frame's tuning (450 ms, 40 %)
+    {
+        const xrfg::TurnBrake defaults{};
+        expect(defaults.threshold_deg_per_s == 90.0F && defaults.release_fraction == 0.6F &&
+                   defaults.hold_ns == 150'000'000,
+               "the defaults: 90 deg/s, 60 %, 150 ms");
+        expect(static_cast<float>(60U) / 100.0F == 0.6F, "60 % read live is the very 0.6F of before");
+        // the Frame's 21:17 turns (on and off every 0.2-0.3 s): a quick turn, then ~0.2 s slower
+        const float wobble[] = {130.0F, 130.0F, 40.0F, 40.0F, 40.0F, 40.0F, 40.0F, 40.0F, 40.0F, 40.0F};
+        xrfg::TurnBrake today{};
+        xrfg::TurnBrake frame{};
+        frame.release_fraction = static_cast<float>(40U) / 100.0F;
+        frame.hold_ns = 450'000'000;
+        int today_changes = 0;
+        int frame_changes = 0;
+        bool today_was = false;
+        bool frame_was = false;
+        std::int64_t at = 0;
+        for (int lap = 0; lap < 4; ++lap) {
+            for (const float turn : wobble) {
+                at += kFrame;
+                const bool today_on = today.update(turn, at);
+                const bool frame_on = frame.update(turn, at);
+                today_changes += today_on != today_was ? 1 : 0;
+                frame_changes += frame_on != frame_was ? 1 : 0;
+                today_was = today_on;
+                frame_was = frame_on;
+            }
+        }
+        expect(today_changes >= 4, "the defaults flap on the 21:17 turns (released below 54 deg/s)");
+        expect(frame_changes <= 1, "450 ms / 40 % stay on through them");
+        // the release: 45 deg/s after the hold lets go at 60 % (54), not at 40 % (36)
+        xrfg::TurnBrake release60{};
+        xrfg::TurnBrake release40{};
+        release40.release_fraction = 0.4F;
+        release60.update(200.0F, kFrame);
+        release40.update(200.0F, kFrame);
+        for (int frame_index = 2; frame_index < 20; ++frame_index) {
+            release60.update(45.0F, frame_index * kFrame);
+            release40.update(45.0F, frame_index * kFrame);
+        }
+        expect(!release60.engaged, "45 deg/s: released at 60 %");
+        expect(release40.engaged, "45 deg/s: held at 40 %");
+        // the hold: still after engaging, 150 ms lets go by 200 ms, 450 ms not before 450
+        xrfg::TurnBrake hold150{};
+        xrfg::TurnBrake hold450{};
+        hold450.hold_ns = 450'000'000;
+        hold150.update(200.0F, kFrame);
+        hold450.update(200.0F, kFrame);
+        for (int frame_index = 2; frame_index <= 11; ++frame_index) {  // ~208 ms later
+            hold150.update(0.0F, frame_index * kFrame);
+            hold450.update(0.0F, frame_index * kFrame);
+        }
+        expect(!hold150.engaged, "still for 200 ms: 150 ms let go");
+        expect(hold450.engaged, "still for 200 ms: 450 ms holds");
+        for (int frame_index = 12; frame_index <= 24; ++frame_index) {  // ~480 ms after engaging
+            hold450.update(0.0F, frame_index * kFrame);
+        }
+        expect(!hold450.engaged, "after 450 ms it lets go");
+    }
+
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

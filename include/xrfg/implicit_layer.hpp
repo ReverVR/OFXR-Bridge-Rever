@@ -224,11 +224,25 @@ struct ConfiguredNvidiaOptions {
     const std::filesystem::path& module_directory) noexcept;
 [[nodiscard]] std::uint32_t read_turn_brake_deg(
     const std::filesystem::path& module_directory) noexcept;
+// The brake's tuning (KB ALI-082; the Steam Frame's launch sets 450 / 40, the Quest none): `[ofxr]
+// turn_brake_hold_ms`, the least it stays on once engaged (150 by default, 50 to 2000), and `[ofxr]
+// turn_brake_release`, the speed it lets go below as a percent of turn_brake_deg (60 by default, 10 to
+// 95). OFXR_REVER_TURN_BRAKE_HOLD_MS / OFXR_REVER_TURN_BRAKE_RELEASE in the game's environment win when
+// inside the range; out of range, the ini's, else the default. Read live with turn_brake.
+[[nodiscard]] std::uint32_t read_turn_brake_hold_ms(
+    const std::filesystem::path& module_directory) noexcept;
+[[nodiscard]] std::uint32_t read_turn_brake_release(
+    const std::filesystem::path& module_directory) noexcept;
 
 // Rever VR's GPU-aware dynamic multiplier (xrfg/gpu_aware_multiplier.hpp, KB ALI-079): `[ofxr] gpu_aware`,
 // on unless set to 0 (OFXR_REVER_GPU_AWARE=0 / 1 in the game's environment wins). Read live, like
 // turn_brake.
 [[nodiscard]] bool read_gpu_aware(
+    const std::filesystem::path& module_directory) noexcept;
+// `[ofxr] gpu_margin` (KB ALI-082): the share of the shape's real-frame rate below which the GPU-aware
+// rule steps up, in percent (95 by default, 70 to 99; the Steam Frame's launch sets 90).
+// OFXR_REVER_GPU_MARGIN wins as the two above.
+[[nodiscard]] std::uint32_t read_gpu_margin(
     const std::filesystem::path& module_directory) noexcept;
 
 // `[ofxr] binding_queue` (Rever VR): give the runtime the layer's own binding queue on

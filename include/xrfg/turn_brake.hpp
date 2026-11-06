@@ -49,9 +49,9 @@ namespace xrfg {
 struct TurnBrake {
     // On at this speed (the live `turn_brake_deg`, 90 by default).
     float threshold_deg_per_s{90.0F};
-    // Off below this fraction of it...
+    // Off below this fraction of it (the live turn_brake_release, 60 % by default)...
     float release_fraction{0.6F};
-    // ...and never sooner than this after it came on.
+    // ...and never sooner than this after it came on (the live turn_brake_hold_ms, 150 by default).
     std::int64_t hold_ns{150'000'000};
     float smoothed_deg_per_s{};
     bool engaged{};

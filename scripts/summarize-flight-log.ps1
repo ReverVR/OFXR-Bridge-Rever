@@ -41,8 +41,13 @@ $submissions = @{ 0 = 0; 1 = 0; 2 = 0 }
 $submissionFirstMs = $null
 $submissionLastMs = $null
 $holds = @{ 400 = 0; 401 = 0; 402 = 0 }
-# Rever VR (KB ALI-079): the turn brake (704, generation_prepare c's 4) and the GPU-aware shape (705)
+# Rever VR (KB ALI-079): the turn brake (706, generation_prepare c's 4) and the GPU-aware shape (705);
+# KB ALI-082: their tuning (707, 708). cb142461 wrote the brake as 704, which the single-swapchain rings
+# also use: a 704 is taken for the brake only when a is 1, b (its speed) at least c (its threshold) and c
+# a threshold (20-720).
 $brakeEngagements = 0
+$brakeTunings = [System.Collections.Generic.List[object]]::new()
+$gpuTunings = [System.Collections.Generic.List[object]]::new()
 $brakedFrames = 0
 $brakedSlots = 0
 $readyFrames = 0
@@ -165,9 +170,27 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
                 [int]$entry.Result -in @(700, 701, 705, 765) -and $entry.A -ge 2) {
                 $currentMultiplier = [int]$entry.A
             }
-            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -eq 704 -and
-                $entry.A -eq 1) {
+            if ($entry.Operation -eq 'presenter_transition' -and (
+                    ([int]$entry.Result -eq 706 -and $entry.A -eq 1) -or
+                    ([int]$entry.Result -eq 704 -and $entry.A -eq 1 -and $entry.C -ge 20 -and
+                     $entry.C -le 720 -and $entry.B -ge $entry.C))) {
                 $brakeEngagements++
+            }
+            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -eq 707) {
+                $brakeTunings.Add([pscustomobject]@{
+                    Seconds = $entry.Milliseconds / 1000.0
+                    On = $entry.A -eq 1
+                    Degrees = $entry.B
+                    HoldMs = [Math]::Floor($entry.C / 100)
+                    Release = $entry.C % 100
+                })
+            }
+            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -eq 708) {
+                $gpuTunings.Add([pscustomobject]@{
+                    Seconds = $entry.Milliseconds / 1000.0
+                    On = $entry.A -eq 1
+                    Margin = $entry.B
+                })
             }
             if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -eq 705) {
                 $gpuChanges.Add([pscustomobject]@{
@@ -320,7 +343,24 @@ if ($endFrameBegins.Count -gt 0) {
         Write-Output '  no presenter submissions: the session ran inline'
     }
 
-    # Rever VR (KB ALI-079)
+    # Rever VR (KB ALI-079, ALI-082)
+    if ($brakeTunings.Count -gt 0) {
+        foreach ($tuning in $brakeTunings) {
+            Write-Output ("  brake tuning at {0:N1} s (707): {1}, {2} deg/s, hold {3} ms, release {4} %" -f
+                $tuning.Seconds, $(if ($tuning.On) { 'on' } else { 'off' }), $tuning.Degrees, $tuning.HoldMs,
+                $tuning.Release)
+        }
+    } else {
+        Write-Output '  brake tuning: no 707 (a build before ALI-082: 90 deg/s, hold 150 ms, release 60 %)'
+    }
+    if ($gpuTunings.Count -gt 0) {
+        foreach ($tuning in $gpuTunings) {
+            Write-Output ("  GPU-aware tuning at {0:N1} s (708): {1}, margin {2} %" -f
+                $tuning.Seconds, $(if ($tuning.On) { 'on' } else { 'off' }), $tuning.Margin)
+        }
+    } else {
+        Write-Output '  GPU-aware tuning: no 708 (a build before ALI-082, or no live multiplier: margin 95 %)'
+    }
     if ($readyFrames -gt 0) {
         Write-Output ("  brake: {0} engagements, {1} slots shown as the real frame ({2} real frames held), {3:N1} % of the time" -f
             $brakeEngagements, $brakedSlots, $brakedFrames, (100.0 * $brakedFrames / $readyFrames))

@@ -134,6 +134,40 @@ int main() {
         expect(window(shape, now, 2, 10.0, 0, 4, 0.0) == 0, "no display rate: no step");
     }
 
+    // KB ALI-082: the margin. The default is cb142461's 0.95; the Steam Frame's 90 % lets 44 of 48 real
+    // (144 Hz at 3X; 21:17 stepped to 4X at 45.1) stay at 3X
+    {
+        xrfg::GpuAwareMultiplier defaults;
+        expect(defaults.rate_margin() == 0.95, "the default margin is 0.95");
+        defaults.set_rate_margin(static_cast<double>(95U) / 100.0);
+        expect(defaults.rate_margin() == 0.95, "95 % read live is the very 0.95 of before");
+        std::int64_t now = 0;
+        start(defaults, now, 3, 4, 144.0);
+        window(defaults, now, 3, 44.0, 0, 4, 144.0);
+        expect(window(defaults, now, 3, 44.0, 0, 4, 144.0) == 4, "44 of 48 at 95 %: up to 4X");
+
+        xrfg::GpuAwareMultiplier frame;
+        frame.set_rate_margin(0.90);
+        now = 0;
+        start(frame, now, 3, 4, 144.0);
+        window(frame, now, 3, 44.0, 0, 4, 144.0);
+        expect(window(frame, now, 3, 44.0, 0, 4, 144.0) == 0, "44 of 48 at 90 %: stays at 3X");
+        expect(window(frame, now, 3, 40.0, 0, 4, 144.0) == 4, "40 of 48 at 90 % (under 43.2): up");
+        // late synthetics still step up whatever the margin
+        now = 0;
+        xrfg::GpuAwareMultiplier late;
+        late.set_rate_margin(0.90);
+        start(late, now, 3, 4, 144.0);
+        window(late, now, 3, 48.0, 0, 4, 144.0);
+        expect(window(late, now, 3, 48.0, 3, 4, 144.0) == 4, "3 late synthetics at 90 %: up");
+        // out of range: the default
+        xrfg::GpuAwareMultiplier odd;
+        odd.set_rate_margin(0.5);
+        expect(odd.rate_margin() == 0.95, "0.5: the default");
+        odd.set_rate_margin(1.0);
+        expect(odd.rate_margin() == 0.95, "1.0: the default");
+    }
+
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

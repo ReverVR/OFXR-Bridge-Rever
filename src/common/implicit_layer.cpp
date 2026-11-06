@@ -425,6 +425,47 @@ std::uint32_t read_turn_brake_deg(
     }
 }
 
+// Rever VR's tuning numbers (KB ALI-082): the environment's inside [minimum, maximum], else the ini's
+// inside it, else the default.
+static std::uint32_t rever_tuning_number(
+    const std::filesystem::path& module_directory,
+    const wchar_t* environment_name,
+    const wchar_t* key,
+    int fallback,
+    int minimum,
+    int maximum) noexcept {
+    try {
+        const int environment = rever_environment_number(environment_name);
+        if (environment >= minimum && environment <= maximum) {
+            return static_cast<std::uint32_t>(environment);
+        }
+        if (!module_directory.empty()) {
+            const auto ini_path = module_directory / L"ofxr_bridge.ini";
+            const int value = static_cast<int>(GetPrivateProfileIntW(L"ofxr", key, fallback, ini_path.c_str()));
+            if (value >= minimum && value <= maximum) {
+                return static_cast<std::uint32_t>(value);
+            }
+        }
+    } catch (...) {
+    }
+    return static_cast<std::uint32_t>(fallback);
+}
+
+std::uint32_t read_turn_brake_hold_ms(
+    const std::filesystem::path& module_directory) noexcept {
+    return rever_tuning_number(module_directory, L"OFXR_REVER_TURN_BRAKE_HOLD_MS", L"turn_brake_hold_ms", 150, 50, 2000);
+}
+
+std::uint32_t read_turn_brake_release(
+    const std::filesystem::path& module_directory) noexcept {
+    return rever_tuning_number(module_directory, L"OFXR_REVER_TURN_BRAKE_RELEASE", L"turn_brake_release", 60, 10, 95);
+}
+
+std::uint32_t read_gpu_margin(
+    const std::filesystem::path& module_directory) noexcept {
+    return rever_tuning_number(module_directory, L"OFXR_REVER_GPU_MARGIN", L"gpu_margin", 95, 70, 99);
+}
+
 bool read_gpu_aware(
     const std::filesystem::path& module_directory) noexcept {
     try {

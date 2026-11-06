@@ -8,10 +8,11 @@
 // synthetic and 2.1 repeats a second, 24 synthetics unwritten in 19 s - the GPU (the game, DLSS inside
 // it and OFXR beside it) was full, and 3X (40 real) fitted. So the shape also looks at what reaches the
 // headset, a second at a time:
-//   - up one when the real frames stay below (display rate / multiplier) x 0.95 for a whole second, or
+//   - up one when the real frames stay below (display rate / multiplier) x the margin (0.95 by default,
+//     the live gpu_margin since ALI-082) for a whole second, or
 //     the presenter held 3 or more synthetics (late: 400 for age, 401 unwritten) in it;
 //   - the frame-time rule's step down is let through, then on probation: if the next judged seconds do
-//     not hold 0.95 of the new target (or late synthetics come back) it goes up again, and the next step
+//     not hold the margin of the new target (or late synthetics come back) it goes up again, and the next step
 //     down waits twice as long (3 s, 6, 12, 24, at most 30 s).
 // The second after a change is never judged (the switch drains the GPU once). Never above the ceiling.
 
@@ -26,13 +27,21 @@ public:
     static constexpr std::int64_t kProbationNs = 4'000'000'000;  // the discarded second and three judged
     static constexpr std::int64_t kFirstHoldNs = 3'000'000'000;
     static constexpr std::int64_t kLongestHoldNs = 30'000'000'000;
-    static constexpr double kRateMargin = 0.95;
+    static constexpr double kDefaultRateMargin = 0.95;
+    static constexpr double kLowestRateMargin = 0.70;
+    static constexpr double kHighestRateMargin = 0.99;
     static constexpr std::uint32_t kLateLimit = 3;
 
     // One real frame (an application xrEndFrame).
     void count_frame() noexcept { ++window_frames_; }
     // Late synthetics the presenter held since the last call.
     void count_late(std::uint32_t late) noexcept { window_late_ += late; }
+
+    // The share of the shape's real-frame rate it must keep (KB ALI-082); out of range, the default.
+    void set_rate_margin(double margin) noexcept {
+        rate_margin_ = margin >= kLowestRateMargin && margin <= kHighestRateMargin ? margin : kDefaultRateMargin;
+    }
+    [[nodiscard]] double rate_margin() const noexcept { return rate_margin_; }
 
     // Whether the frame-time rule may step down now.
     [[nodiscard]] bool may_step_down(std::int64_t now_ns) const noexcept {
@@ -68,7 +77,7 @@ public:
             return 0;
         }
         const double target = display_hz / static_cast<double>(current);
-        const bool short_of_target = last_real_fps_ < target * kRateMargin;
+        const bool short_of_target = last_real_fps_ < target * rate_margin_;
         const bool late = last_late_ >= kLateLimit;
         if (probation_from_ != 0) {
             if (short_of_target || late) {
@@ -114,6 +123,7 @@ private:
     std::int64_t probation_until_ns_{};
     std::int64_t down_blocked_until_ns_{};
     std::int64_t down_hold_ns_{kFirstHoldNs};
+    double rate_margin_{kDefaultRateMargin};
 };
 
 }  // namespace xrfg
