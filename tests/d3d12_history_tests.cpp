@@ -6074,6 +6074,131 @@ void test_hybrid_side_by_side(D3D12WarpFixture& fixture, bool one_field = false)
     require(operation_succeeded(history->invalidate()), "side-by-side history invalidate failed");
 }
 
+// Rever VR, Alien Isolation (KB ALI-065): Rever's layer packs OpenComposite's two eye swapchains into one
+// side-by-side image, and the Rever game-motion source publishes one field across it (rever_game_motion_halves:
+// each eye's vectors over its whole half). Without the hybrid that pair takes the game-motion ("DLSS-vector") path -
+// the game's vectors alone, no optical flow, as Lone Echo II's sealed DLSS NATIVO OFXR x3 runs. Each view, cut
+// inside its half as Alien's lenses cut them, has to be drawn with its own half of the one field: the eyes move
+// opposite ways, so a view drawn with the other half's vectors would land 8 pixels off.
+void test_game_motion_side_by_side_one_field(D3D12WarpFixture& fixture) {
+    constexpr UINT half = 128, width = half * 2U, height = 128;
+    constexpr UINT margin = 12;
+    constexpr std::array<int, kEyeCount> motion{8, -8};
+    const auto make_scene = [&](const std::array<int, kEyeCount>& shift) {
+        std::vector<std::uint8_t> bytes(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+        for (UINT y = 0; y < height; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const UINT eye = x / half;
+                const int bx = static_cast<int>(x % half) - shift[eye] + 64;
+                const RgbaBytes color{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
+                    static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
+                    static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
+                std::copy(color.begin(), color.end(), bytes.begin() +
+                    (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+            }
+        }
+        return bytes;
+    };
+    const auto previous = make_scene({0, 0});
+    const auto current = make_scene(motion);
+    const auto expected = make_scene({motion[0] / 2, motion[1] / 2});
+    // One field over the whole image (current -> previous, image pixels): each half its own eye's vectors.
+    auto game_motion = create_and_upload_game_motion_field(fixture, width, height, [&](UINT, UINT x, UINT) {
+        return std::array<float, 2>{static_cast<float>(-motion[x / half]), 0.0F};
+    });
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_single_slice_texture(fixture, width, height),
+        create_single_slice_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_single_slice_texture(fixture, width, height),
+        create_single_slice_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{
+        create_single_slice_texture(fixture, width, height)};
+    upload_single_slice(fixture, sources[0].Get(), previous);
+    upload_single_slice(fixture, sources[1].Get(), current);
+    std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{
+        current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic_destinations[0].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+        "Rever side-by-side history initialization failed");
+    xrfg::D3D12FrameSynthesizer synthesizer;  // no hybrid: the game-motion path
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                history, current_pointers, synthetic_pointers, kFormat,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx)),
+        "Rever side-by-side synthesizer initialization failed");
+    const auto guides = [&](std::uint64_t serial) {
+        auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+        frame->stream = 431;
+        frame->epoch = 3;
+        frame->serial = serial;
+        frame->previous_serial = serial - 1;
+        frame->motion_vectors = game_motion;
+        frame->producer_queue = fixture.queue();
+        frame->output_width = frame->motion_width = width;
+        frame->output_height = frame->motion_height = height;
+        frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = 1;
+        set->eyes[0] = frame;
+        return set;
+    };
+    // Alien's packed eyes (KB ALI-052, scaled): eye 0 at the left of its half and a little down, eye 1 well into its
+    // half - neither the half itself.
+    ReprojectionViews views = make_reprojection_views();
+    views[0].image_rect = {2, 16, half - 18, height - 16};
+    views[1].image_rect = {half + 16, 14, half - 16, height - 14};
+    for (auto& view : views) view.array_slice = 0;
+    xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
+    require(operation_succeeded(history->capture(0, &capture_a)) &&
+            operation_succeeded(history->commit(capture_a)),
+        "Rever side-by-side capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
+        "Rever side-by-side prime failed");
+    require_frame_start_gate(synthesizer, "Rever side-by-side frame-start gate");
+    require(operation_succeeded(history->capture(1, &capture_b)) &&
+            operation_succeeded(history->commit(capture_b)),
+        "Rever side-by-side capture B failed");
+    const auto statistics_before = xrfg::dlss_motion_vector_statistics();
+    require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+                std::nullopt, guides(2))),
+        "Rever side-by-side pair failed");
+    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    const auto statistics_after = xrfg::dlss_motion_vector_statistics();
+    require(statistics_after.used == statistics_before.used + 1 &&
+            statistics_after.status == xrfg::DlssMotionVectorStatus::used,
+        "the Rever side-by-side pair did not take the game-motion path");
+    const auto actual = readback_single_slice(
+        fixture, synthetic_destinations[0].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        const auto& rect = views[eye].image_rect;
+        double total = 0, blend_total = 0;
+        std::size_t count = 0;
+        for (UINT y = rect.offset_y + margin; y + margin < rect.offset_y + rect.height; ++y) {
+            for (UINT x = rect.offset_x + margin; x + margin < rect.offset_x + rect.width; ++x) {
+                const std::size_t offset = (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel;
+                for (UINT c = 0; c < 3; ++c, ++count) {
+                    const int truth = expected[offset + c];
+                    blend_total += std::abs((previous[offset + c] + current[offset + c]) / 2 - truth);
+                    total += std::abs(static_cast<int>(actual[offset + c]) - truth);
+                }
+            }
+        }
+        const double error = total / static_cast<double>(count);
+        const double blend_error = blend_total / static_cast<double>(count);
+        std::cout << "Rever side-by-side one field eye=" << eye << " synthetic_mae=" << error
+                  << " blend_mae=" << blend_error << '\n';
+        require(error <= 1.0 && error < blend_error,
+            "Rever side-by-side eye " + std::to_string(eye) +
+                " was not drawn with its own half of the field: " + std::to_string(error));
+    }
+    require(operation_succeeded(synthesizer.wait_for_idle()), "Rever side-by-side final drain failed");
+    require(operation_succeeded(history->invalidate()), "Rever side-by-side history invalidate failed");
+}
+
 // V505: thin near bars on a lateral move. The bars travel 16 px a frame
 // over a background travelling 4, so between the two frames each bar sweeps
 // over background that both frames show: the solve from the generated pixel
@@ -6821,6 +6946,15 @@ int main(int argc, char** argv) {
             std::cout << "D3D12 NVIDIA OFA synthesis test passed\n";
             return 0;
         }
+        if (argc > 1 && std::string_view(argv[1]) == "rever-side-by-side") {
+            // Rever VR (KB ALI-065): Alien's packed eyes, one field, on the game-motion path alone.
+            SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
+            D3D12WarpFixture rever_fixture;
+            test_game_motion_side_by_side_one_field(rever_fixture);
+            rever_fixture.require_no_debug_errors();
+            std::cout << "Rever side-by-side game-motion test passed\n";
+            return 0;
+        }
         if (argc > 1 && std::string_view(argv[1]) == "panel") {
             // V509 on the GPU: a flat panel's marker moved by the flow.
             SetEnvironmentVariableW(L"XRFG_IGNORE_LIVE_TUNING", L"1");
@@ -6997,6 +7131,7 @@ int main(int argc, char** argv) {
         test_release_bound_dlss_guides(fixture);
         test_dlss_motion_vector_gpu_ingress(fixture);
         test_dlss_motion_vector_strafe_rejects_double_edges(fixture);
+        test_game_motion_side_by_side_one_field(fixture);  // Rever VR, KB ALI-065
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
         test_submission_backpressure_and_recovery(
             fixture,
