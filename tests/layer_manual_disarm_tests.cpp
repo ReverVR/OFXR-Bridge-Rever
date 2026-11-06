@@ -41,6 +41,15 @@ std::array<std::size_t, 2> marker_pixels(
 struct FinishedEarly {};
 
 int main(int argc, char** argv) {
+    // Rever VR (KB ALI-079): the fake runtime turns the head ~400 deg/s on its paced timelines (and steps
+    // 100 ns a frame otherwise), so the turn brake would prime every frame and the GPU-aware shape follow the
+    // harness's own pace: both off here unless a test sets them.
+    if (GetEnvironmentVariableW(L"OFXR_REVER_TURN_BRAKE", nullptr, 0) == 0) {
+        SetEnvironmentVariableW(L"OFXR_REVER_TURN_BRAKE", L"0");
+    }
+    if (GetEnvironmentVariableW(L"OFXR_REVER_GPU_AWARE", nullptr, 0) == 0) {
+        SetEnvironmentVariableW(L"OFXR_REVER_GPU_AWARE", L"0");
+    }
     if (argc < 3) return 1;
     const std::string mode = argv[2];
     // "pacing <runtime> <shape> <game_ms> <seconds> [log_copy]": the release

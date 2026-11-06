@@ -215,6 +215,22 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_capture_at_end_frame(
     const std::filesystem::path& module_directory) noexcept;
 
+// Rever VR's turn brake (xrfg/turn_brake.hpp, KB ALI-079): `[ofxr] turn_brake`, on unless set to 0
+// (OFXR_REVER_TURN_BRAKE=0 / 1 in the game's environment wins), and `[ofxr] turn_brake_deg`, the head's
+// speed in degrees a second that engages it (90 by default, 20 to 720; OFXR_REVER_TURN_BRAKE_DEG wins).
+// Read live, every quarter second: the tray rewrites the ini without them at each arm, which is the
+// default, so an A/B edits the running ini.
+[[nodiscard]] bool read_turn_brake(
+    const std::filesystem::path& module_directory) noexcept;
+[[nodiscard]] std::uint32_t read_turn_brake_deg(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's GPU-aware dynamic multiplier (xrfg/gpu_aware_multiplier.hpp, KB ALI-079): `[ofxr] gpu_aware`,
+// on unless set to 0 (OFXR_REVER_GPU_AWARE=0 / 1 in the game's environment wins). Read live, like
+// turn_brake.
+[[nodiscard]] bool read_gpu_aware(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] binding_queue` (Rever VR): give the runtime the layer's own binding queue on
 // every runtime, not only SteamVR. For an API layer above OFXR that finishes the
 // application's frame on the GPU after its release (Rever's DLSS-NR layer, ~10 ms later):

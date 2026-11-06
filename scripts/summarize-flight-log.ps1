@@ -41,6 +41,13 @@ $submissions = @{ 0 = 0; 1 = 0; 2 = 0 }
 $submissionFirstMs = $null
 $submissionLastMs = $null
 $holds = @{ 400 = 0; 401 = 0; 402 = 0 }
+# Rever VR (KB ALI-079): the turn brake (704, generation_prepare c's 4) and the GPU-aware shape (705)
+$brakeEngagements = 0
+$brakedFrames = 0
+$brakedSlots = 0
+$readyFrames = 0
+$currentMultiplier = 2
+$gpuChanges = [System.Collections.Generic.List[object]]::new()
 $deferredCaptures = 0
 $deferredCaptureFailures = 0
 $bridgedReleaseDelays = [System.Collections.Generic.List[double]]::new()
@@ -152,6 +159,30 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
             if ($entry.Operation -eq 'presenter_transition' -and
                 $holds.ContainsKey([int]$entry.Result)) {
                 $holds[[int]$entry.Result]++
+            }
+            # the shape now (700 applied, 701 / 705 asked, 765 at the start: a the multiplier)
+            if ($entry.Operation -eq 'presenter_transition' -and
+                [int]$entry.Result -in @(700, 701, 705, 765) -and $entry.A -ge 2) {
+                $currentMultiplier = [int]$entry.A
+            }
+            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -eq 704 -and
+                $entry.A -eq 1) {
+                $brakeEngagements++
+            }
+            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -eq 705) {
+                $gpuChanges.Add([pscustomobject]@{
+                    Seconds = $entry.Milliseconds / 1000.0
+                    Multiplier = $entry.A
+                    RealFps = $entry.B / 10.0
+                    Late = $entry.C
+                })
+            }
+            if ($entry.Operation -eq 'generation_prepare' -and $entry.Result -eq 0) {
+                $readyFrames++
+                if (($entry.C -band 4) -ne 0) {
+                    $brakedFrames++
+                    $brakedSlots += [Math]::Max(1, $currentMultiplier - 1)
+                }
             }
             if ($entry.Operation -eq 'deferred_capture') {
                 $deferredCaptures++
@@ -287,6 +318,21 @@ if ($endFrameBegins.Count -gt 0) {
             $holds[400], $holds[401], $holds[402])
     } else {
         Write-Output '  no presenter submissions: the session ran inline'
+    }
+
+    # Rever VR (KB ALI-079)
+    if ($readyFrames -gt 0) {
+        Write-Output ("  brake: {0} engagements, {1} slots shown as the real frame ({2} real frames held), {3:N1} % of the time" -f
+            $brakeEngagements, $brakedSlots, $brakedFrames, (100.0 * $brakedFrames / $readyFrames))
+    }
+    if ($gpuChanges.Count -gt 0) {
+        Write-Output ("  GPU-aware shape: {0} steps (705)" -f $gpuChanges.Count)
+        foreach ($change in $gpuChanges) {
+            Write-Output ("    {0,7:N1} s: {1}X, {2:N1} real/s, {3} late synthetics" -f
+                $change.Seconds, $change.Multiplier, $change.RealFps, $change.Late)
+        }
+    } else {
+        Write-Output '  GPU-aware shape: no step (705)'
     }
 
     if ($deferredCaptures -gt 0) {

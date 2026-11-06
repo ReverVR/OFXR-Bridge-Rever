@@ -2297,6 +2297,15 @@ template <typename Record>
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Rever VR (KB ALI-079): the fake runtime turns the head ~400 deg/s on its paced timelines (and steps
+    // 100 ns a frame otherwise), so the turn brake would prime every frame and the GPU-aware shape follow the
+    // harness's own pace: both off here unless a test sets them.
+    if (GetEnvironmentVariableW(L"OFXR_REVER_TURN_BRAKE", nullptr, 0) == 0) {
+        SetEnvironmentVariableW(L"OFXR_REVER_TURN_BRAKE", L"0");
+    }
+    if (GetEnvironmentVariableW(L"OFXR_REVER_GPU_AWARE", nullptr, 0) == 0) {
+        SetEnvironmentVariableW(L"OFXR_REVER_GPU_AWARE", L"0");
+    }
     if (argc != 3 && argc != 4) {
         std::cerr <<
             "usage: xrfg_layer_call_chain <layer-dll> <log-path> "

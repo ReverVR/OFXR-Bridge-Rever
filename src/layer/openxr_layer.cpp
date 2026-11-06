@@ -17,6 +17,8 @@
 #include "xrfg/openxr_fps_overlay.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include "xrfg/submit_margin.hpp"
+#include "xrfg/turn_brake.hpp"
+#include "xrfg/gpu_aware_multiplier.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -1193,6 +1195,19 @@ struct SessionState {
     std::atomic<std::int64_t> dynamic_wait_returned_ns{};
     double dynamic_frame_ns{};
     std::chrono::steady_clock::time_point dynamic_hold_until{};
+    // Rever VR's turn brake (xrfg/turn_brake.hpp, KB ALI-079): the live keys, polled every quarter
+    // second, and the brake's state, all the xrEndFrame thread's.
+    std::chrono::steady_clock::time_point turn_brake_poll_at{};
+    bool turn_brake_enabled{true};
+    xrfg::TurnBrake turn_brake{};
+    std::uint64_t turn_brake_engagements{};
+    std::uint64_t turn_brake_frames{};
+    // Rever VR's GPU-aware dynamic multiplier (xrfg/gpu_aware_multiplier.hpp, KB ALI-079): the live key,
+    // the real frames and the presenter's late synthetics a second at a time. The late count is the
+    // presenter thread's (400 / 401), taken by the xrEndFrame thread at each poll.
+    bool gpu_aware{true};
+    xrfg::GpuAwareMultiplier gpu_aware_multiplier{};
+    std::atomic<std::uint32_t> gpu_late_synthetics{};
     // The flight log's vram_usage records. The adapter is found from the
     // first device the session has; what it reports is the process's use of
     // that adapter, whichever device made the allocation.
@@ -9890,6 +9905,8 @@ void continuous_presenter_main(
                             std::chrono::nanoseconds>(age).count();
                         held_sequence = front->sequence;
                         held_reason = too_young ? 400 : 401;
+                        // Rever VR's GPU-aware dynamic multiplier (KB ALI-079)
+                        state->gpu_late_synthetics.fetch_add(1, std::memory_order_relaxed);
                         repeated_frame = state->presenter_last_frame;
                         // A first synthetic kept back for its output is as
                         // late as one handed over unwritten: the slot shows a
@@ -14675,6 +14692,69 @@ void follow_composition_switches() noexcept {
     xrfg::set_composition_switches(false);
 }
 
+// Rever VR's turn brake (KB ALI-079): its live keys, a quarter second apart, for every session (not only
+// a switchable one, which apply_live_frame_multiplier is limited to).
+void poll_turn_brake(SessionState& state) noexcept {
+    try {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < state.turn_brake_poll_at) {
+            return;
+        }
+        state.turn_brake_poll_at = now + std::chrono::milliseconds(250);
+        const auto directory = current_layer_directory();
+        state.turn_brake_enabled = xrfg::implicit_layer::read_turn_brake(directory);
+        state.turn_brake.threshold_deg_per_s =
+            static_cast<float>(xrfg::implicit_layer::read_turn_brake_deg(directory));
+    } catch (...) {
+    }
+}
+
+// Whether the brake holds this real frame: the head's speed between the previous real frame's view
+// and this one's (the first projection layer's first view, in one space), the hysteresis of
+// xrfg::TurnBrake. Held, the frame is primed instead of paired: its history kept, nothing invented,
+// the presenter (or the runtime, inline) showing it again in the synthetic's slots, turned by the
+// headset. Flight log 704 at each change.
+bool update_turn_brake(
+    SessionState& state,
+    const ProjectionSnapshot& previous,
+    const ProjectionSnapshot& current) noexcept {
+    const bool was = state.turn_brake.engaged;
+    if (!state.turn_brake_enabled) {
+        state.turn_brake.reset();
+    } else {
+        float speed = -1.0F;
+        if (!previous.layers.empty() && !current.layers.empty() &&
+            !previous.layers.front().views.empty() && !current.layers.front().views.empty() &&
+            previous.layers.front().space == current.layers.front().space) {
+            const XrQuaternionf& from = previous.layers.front().views.front().pose.orientation;
+            const XrQuaternionf& to = current.layers.front().views.front().pose.orientation;
+            speed = xrfg::angular_speed_deg_per_s(
+                {from.x, from.y, from.z, from.w},
+                {to.x, to.y, to.z, to.w},
+                static_cast<std::int64_t>(current.display_time - previous.display_time));
+        }
+        state.turn_brake.update(speed, static_cast<std::int64_t>(current.display_time));
+    }
+    const bool engaged = state.turn_brake.engaged;
+    if (engaged != was) {
+        if (engaged) {
+            ++state.turn_brake_engagements;
+        }
+        // 704: Rever VR's turn brake. a 1 on / 0 off, b the head's smoothed speed in degrees a
+        // second, c the threshold in degrees a second.
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            704,
+            engaged ? 1u : 0u,
+            static_cast<std::uint64_t>(std::max(0.0F, state.turn_brake.smoothed_deg_per_s)),
+            static_cast<std::uint64_t>(state.turn_brake.threshold_deg_per_s));
+    }
+    if (engaged) {
+        ++state.turn_brake_frames;
+    }
+    return engaged;
+}
+
 void apply_live_frame_multiplier(
     const std::shared_ptr<SessionState>& state,
     bool use_continuous_presenter) noexcept {
@@ -14697,6 +14777,8 @@ void apply_live_frame_multiplier(
                     ? static_cast<double>(frame_ns)
                     : state->dynamic_frame_ns * 0.92 + static_cast<double>(frame_ns) * 0.08;
             }
+            // and what reaches the headset: one more real frame (KB ALI-079)
+            state->gpu_aware_multiplier.count_frame();
         }
         // The ini is rewritten by the tray; a read every quarter second is
         // cheap and nothing here is urgent.
@@ -14706,6 +14788,11 @@ void apply_live_frame_multiplier(
         state->triple_poll_at = now + std::chrono::milliseconds(250);
         std::uint32_t requested =
             xrfg::implicit_layer::read_frame_multiplier(current_layer_directory());
+        state->gpu_aware = xrfg::implicit_layer::read_gpu_aware(current_layer_directory());
+        state->gpu_aware_multiplier.count_late(
+            state->gpu_late_synthetics.exchange(0, std::memory_order_relaxed));
+        const std::int64_t now_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
         if (state->dynamic_frame_gen) {
             // One more frame between game frames once a frame takes more
             // than the periods the shape gives it (it would miss its slot),
@@ -14723,7 +14810,11 @@ void apply_live_frame_multiplier(
                 const double periods = state->dynamic_frame_ns / period;
                 if (requested < ceiling && periods > requested + 0.05) {
                     ++requested;
-                } else if (requested > 2U && periods < requested - 1.3) {
+                } else if (requested > 2U && periods < requested - 1.3 &&
+                           (!state->gpu_aware ||
+                            state->gpu_aware_multiplier.may_step_down(now_ns))) {
+                    // the GPU-aware rule (KB ALI-079) lets a step down through only once its hold,
+                    // doubled by each one the GPU could not keep, has passed
                     --requested;
                 }
                 if (requested != current) {
@@ -14737,6 +14828,31 @@ void apply_live_frame_multiplier(
                         requested,
                         static_cast<std::uint64_t>(state->dynamic_frame_ns / 1000.0),
                         static_cast<std::uint64_t>(period / 1000.0));
+                    if (state->gpu_aware && requested < current) {
+                        state->gpu_aware_multiplier.stepped_down(current, now_ns);
+                    }
+                }
+            }
+            // Rever VR's GPU-aware dynamic multiplier (KB ALI-079): one more frame between game frames
+            // when the real ones fall short of the shape's or the presenter holds late synthetics, a
+            // second at a time; a step down on probation. Judged at every poll, the frame-time rule's
+            // hold notwithstanding (a change's own second is never judged).
+            if (state->gpu_aware && period > 0.0) {
+                const std::uint32_t asked = state->gpu_aware_multiplier.evaluate(
+                    now_ns, current, ceiling, 1.0e9 / period);
+                if (asked > current && requested == current) {
+                    requested = asked;
+                    state->dynamic_hold_until = now + std::chrono::seconds(3);
+                    // 705: Rever VR's GPU-aware dynamic shape. a the new frames per application
+                    // frame, b the real frames a second x 10 in the second judged, c the late
+                    // synthetics (held for age or unwritten, 400 / 401) in it
+                    xrfg::bridge_flight_logger().event(
+                        xrfg::BridgeFlightOperation::presenter_transition,
+                        705,
+                        requested,
+                        static_cast<std::uint64_t>(
+                            state->gpu_aware_multiplier.last_real_fps() * 10.0 + 0.5),
+                        state->gpu_aware_multiplier.last_late());
                 }
             }
         }
@@ -15029,6 +15145,7 @@ XrResult layer_end_frame_impl(
     };
 
     apply_live_frame_multiplier(state, use_continuous_presenter);
+    poll_turn_brake(*state);
     follow_composition_switches();
     publish_status(*state);
     log_video_memory_periodically(*state);
@@ -15358,6 +15475,10 @@ XrResult layer_end_frame_impl(
             !state->deep_pipeline);
     const bool metadata_pairable =
         latest_application_frame && previous_snapshot && snapshots_compatible;
+    // Rever VR's turn brake (KB ALI-079): a frame that would pair is primed while the head turns fast.
+    const bool turn_braked =
+        metadata_pairable && update_turn_brake(*state, *previous_snapshot, current_snapshot);
+    const bool pair_requested = metadata_pairable && !turn_braked;
     if (previous_snapshot && !snapshots_compatible) {
         if (!projection_resource_layout_compatible(
                 *previous_snapshot,
@@ -15399,7 +15520,7 @@ XrResult layer_end_frame_impl(
             return capacity_result;
         }
         if (presenter_hold_at_admission(*state) &&
-            (metadata_pairable || presenter_holds_primes(*state))) {
+            (pair_requested || presenter_holds_primes(*state))) {
             // The once-per-pair hold, ahead of synthesis rather than after the
             // hand-over: see presenter_hold_at_admission for why the placement
             // matters. A frame that will pair is held for the pair; one that
@@ -15409,7 +15530,7 @@ XrResult layer_end_frame_impl(
             // held at all (presenter_holds_primes). It returns without an
             // error on a presenter failure; the enqueue below is what refuses
             // the frame.
-            wait_for_presenter_pair(state, metadata_pairable, false);
+            wait_for_presenter_pair(state, pair_requested, false);
         }
     }
     // The synthetic is displayed one display period before the current frame,
@@ -15449,7 +15570,7 @@ XrResult layer_end_frame_impl(
         std::span<const ProjectionResourceMapping>(
             resource_mappings.mappings.data(),
             resource_mappings.mappings.size()),
-        metadata_pairable,
+        pair_requested,
         interpolation_fraction,
         extra_interpolation_fractions,
         // Released at the hand-over where the runtime has the layer's own
@@ -15538,7 +15659,8 @@ XrResult layer_end_frame_impl(
             handle_value(failed_prepare_swapchain),
             static_cast<std::uint64_t>(prepared.kind),
             (metadata_pairable ? 1u : 0u) |
-                (latest_application_frame ? 2u : 0u));
+                (latest_application_frame ? 2u : 0u) |
+                (turn_braked ? 4u : 0u));
         schedule_generation_quarantine(
             state,
             GenerationQuarantineReason::generation_prepare_failed,
@@ -15793,7 +15915,8 @@ XrResult layer_end_frame_impl(
         handle_value(failed_prepare_swapchain),
         static_cast<std::uint64_t>(prepared.kind),
         (metadata_pairable ? 1u : 0u) |
-            (latest_application_frame ? 2u : 0u));
+            (latest_application_frame ? 2u : 0u) |
+            (turn_braked ? 4u : 0u));
 
     const auto first_end_token = xrfg::bridge_flight_logger().begin(
         xrfg::BridgeFlightOperation::downstream_first_end_frame,

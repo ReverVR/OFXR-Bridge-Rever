@@ -374,6 +374,74 @@ static bool rever_environment_flag(const wchar_t* name) noexcept {
     return length > 0 && length < 8 && value[0] == L'1';
 }
 
+// Rever VR: an environment variable's whole value as a number; -1 when it is not set or not a number.
+static int rever_environment_number(const wchar_t* name) noexcept {
+    wchar_t value[16] = {};
+    const DWORD length = GetEnvironmentVariableW(name, value, 16);
+    if (length == 0 || length >= 16) {
+        return -1;
+    }
+    int number = 0;
+    for (DWORD index = 0; index < length; ++index) {
+        if (value[index] < L'0' || value[index] > L'9') {
+            return -1;
+        }
+        number = number * 10 + (value[index] - L'0');
+    }
+    return number;
+}
+
+bool read_turn_brake(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        const int environment = rever_environment_number(L"OFXR_REVER_TURN_BRAKE");
+        if (environment == 0 || environment == 1) {
+            return environment == 1;
+        }
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(L"ofxr", L"turn_brake", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
+std::uint32_t read_turn_brake_deg(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        int degrees = rever_environment_number(L"OFXR_REVER_TURN_BRAKE_DEG");
+        if (degrees < 0 && !module_directory.empty()) {
+            const auto ini_path = module_directory / L"ofxr_bridge.ini";
+            degrees = static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"turn_brake_deg", 90, ini_path.c_str()));
+        }
+        if (degrees < 20 || degrees > 720) {
+            return 90U;
+        }
+        return static_cast<std::uint32_t>(degrees);
+    } catch (...) {
+        return 90U;
+    }
+}
+
+bool read_gpu_aware(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        const int environment = rever_environment_number(L"OFXR_REVER_GPU_AWARE");
+        if (environment == 0 || environment == 1) {
+            return environment == 1;
+        }
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(L"ofxr", L"gpu_aware", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
 bool read_binding_queue(
     const std::filesystem::path& module_directory) noexcept {
     try {
