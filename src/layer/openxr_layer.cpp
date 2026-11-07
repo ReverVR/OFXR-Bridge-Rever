@@ -616,6 +616,16 @@ struct Dispatch {
     // 17.4 repeats a second, "traquetea").
     bool rever_streamer_runtime{};
     bool rever_presenter{};
+    // Rever VR: OFXR_REVER_PRESENTER_SPLIT=1, with rever_presenter. A split
+    // frame loop (split_frame_loop) on a D3D12 session then takes the
+    // presenter as a one-thread loop does (frame_loop_takes_presenter),
+    // where it stayed inline for the session. Lone Echo 2 through Revive
+    // calls xrWaitFrame and xrBeginFrame on one thread and xrEndFrame from a
+    // pool of fifteen, one after the other: inline at 144 Hz on the Steam
+    // Frame each synthetic and its real frame went down 0.2 ms apart, then
+    // nothing for a whole application frame, 2X / 3X changing eight times in
+    // three minutes, "va a golpes" (Rever VR, 2026-11-07). Off, the old rule.
+    bool rever_presenter_split{};
     XrVersion runtime_version{};
     std::string runtime_name;
 };
@@ -5069,6 +5079,11 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->rever_presenter = dispatch->rever_streamer_runtime &&
                 GetEnvironmentVariableA("OFXR_REVER_PRESENTER", presenter, sizeof presenter) > 0 &&
                 presenter[0] == '1';
+            char presenter_split[8]{};
+            dispatch->rever_presenter_split = dispatch->rever_presenter &&
+                GetEnvironmentVariableA(
+                    "OFXR_REVER_PRESENTER_SPLIT", presenter_split, sizeof presenter_split) > 0 &&
+                presenter_split[0] == '1';
             dispatch->inline_unless_pipelined =
                 dispatch->virtual_desktop_runtime ||
                 std::string_view(dispatch->runtime_name).find(
@@ -14082,13 +14097,35 @@ struct InternalCycleResult {
 // back one a pass-through took (presenter_restore_after_bypass). 601: the
 // request, once per request; a the end thread, b 1 when it gives back the
 // presenter a pass-through stopped, c the graphics binding.
+//
+// Rever VR: on Rever Streamer's runtime with OFXR_REVER_PRESENTER_SPLIT=1
+// (rever_presenter_split) a split loop takes it as a one-thread loop does, on
+// a D3D12 session only - the runtime's own, or the one the D3D11 or Vulkan
+// bridge made. Nothing that keeps a split loop inline elsewhere holds there.
+// The rule above is a choice of mode, made for No Man's Sky's GPU headroom on
+// Virtual Desktop, not a hazard: SteamVR has always run split loops on the
+// presenter. The D3D11 driver fault (presenter_forbidden) needs the D3D11
+// interop, and a bridged session has neither it nor the runtime-entry gate a
+// presenter's xrWaitFrame held on Alien (see rever_streamer_runtime). And no
+// lock reaches across the two threads: the presenter's thread takes no frame
+// call lock; the application's virtual wait blocks only until the presenter's
+// first runtime wait returns, which needs nothing from the end thread (the
+// frame that starts the presenter was submitted, or is adopted, before it
+// waits); and the once-per-pair hold in xrEndFrame lets frame_call_mutex go
+// before it waits, so a wait on another thread is never shut out by it (MSFS
+// 2024's freeze, see the virtual wait). 607: the split loop takes it by the
+// switch; a the end thread, c the graphics binding.
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
+    const bool rever_split = state->split_frame_loop &&
+        state->dispatch->rever_presenter_split &&
+        state->graphics_binding == SessionGraphicsBinding::d3d12;
     if (!state->dispatch->inline_unless_pipelined ||
         (state->dispatch->rever_streamer_runtime &&
          (state->d3d11_device != nullptr || !state->dispatch->rever_presenter)) ||
         state->steamvr_presenter_start_requested ||
-        (state->split_frame_loop && !state->presenter_restore_after_bypass)) {
+        (state->split_frame_loop && !state->presenter_restore_after_bypass &&
+         !rever_split)) {
         return false;
     }
     xrfg::bridge_flight_logger().event(
@@ -14097,6 +14134,14 @@ struct InternalCycleResult {
         state->application_end_thread_id,
         state->presenter_restore_after_bypass ? 1 : 0,
         static_cast<std::uint64_t>(state->graphics_binding));
+    if (rever_split) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            607,
+            state->application_end_thread_id,
+            0,
+            static_cast<std::uint64_t>(state->graphics_binding));
+    }
     return true;
 }
 

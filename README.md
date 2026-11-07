@@ -34,6 +34,12 @@
 >   `ReverVR\ofxr_game_motion.log`).
 > * Build number V5771, so its `RuntimeLayer\v5771` folder never collides with
 >   the official build.
+> * Branch `rever-0.2.14.3-le2-split`, build **V5772** (`RuntimeLayer\v5772`,
+>   beside V5771): `OFXR_REVER_PRESENTER_SPLIT=1`, with
+>   `OFXR_REVER_PRESENTER=1` on Rever Streamer's runtime, lets a split frame
+>   loop on a D3D12 session take the presenter as a one-thread loop does.
+>   Lone Echo 2 through Revive waits and begins on one thread and ends its
+>   frames from a pool of others, so it ran inline. Off unless set to 1.
 >
 > License unchanged: LGPL-3.0-or-later.
 

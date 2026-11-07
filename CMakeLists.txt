@@ -2,7 +2,10 @@ cmake_minimum_required(VERSION 3.24)
 
 # Rever VR's fork of v0.2.14.3 (V577): its own build number, so its RuntimeLayer\v5771 folder
 # never collides with the official v577 one when both are installed.
-project(XRFrameGenerationBridge VERSION 0.5771.0 LANGUAGES CXX)
+# Branch rever-0.2.14.3-le2-split: V5772, Lone Echo 2's build (OFXR_REVER_PRESENTER_SPLIT). The tray
+# copies the layer into RuntimeLayer\v<minor>, so a second build at 5771 would overwrite the runtime
+# copy of V5771, the build Alien: Isolation is sealed with.
+project(XRFrameGenerationBridge VERSION 0.5772.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -921,9 +924,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # gets back a presenter a pass-through stopped; Pimax OpenXR stays
         # inline; another runtime still goes by the bunched-pair measurement.
         # Rever VR: Rever Streamer's runtime inline on a D3D12 session and on
-        # the D3D11 interop, as Virtual Desktop with OFXR_REVER_PRESENTER=1.
+        # the D3D11 interop, as Virtual Desktop with OFXR_REVER_PRESENTER=1;
+        # with OFXR_REVER_PRESENTER_SPLIT=1 as well, a split loop takes the
+        # presenter like a one-thread loop (V5772, Lone Echo 2).
         foreach(shape
                 "rever;single" "rever;split" "rever-d3d11;single" "rever-presenter;single"
+                "rever-presenter;split" "rever-presenter-split;split" "rever-presenter-split;single"
                 "virtual-desktop;split" "virtual-desktop;split;paused"
                 "virtual-desktop;single" "virtual-desktop;single;paused"
                 "virtual-desktop;handoff"

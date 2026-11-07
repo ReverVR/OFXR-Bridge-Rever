@@ -123,7 +123,10 @@ int main(int argc, char** argv) {
     // "rever" (Rever VR): Rever Streamer's runtime inline on a D3D12 session
     // (the D3D11 bridge's) and, "rever-d3d11", on the D3D11 interop - never by
     // the pairs; "rever-presenter", OFXR_REVER_PRESENTER=1: as Virtual
-    // Desktop on a D3D12 session.
+    // Desktop on a D3D12 session. "rever-presenter-split",
+    // OFXR_REVER_PRESENTER_SPLIT=1 too: a split loop takes the presenter as a
+    // one-thread loop does - Lone Echo 2's shape through Revive, each
+    // xrEndFrame here on a thread of its own as there from a pool of them.
     //
     const bool frame_loop_test = mode == "frame-loop";
     // "recorder": the flight recorder switched on, off and on again while a
@@ -138,10 +141,14 @@ int main(int argc, char** argv) {
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
-    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11" || loop_runtime == "rever-presenter")
+    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11" || loop_runtime == "rever-presenter" ||
+             loop_runtime == "rever-presenter-split")
         g_runtime_name_override = "Rever Streamer";
     else if (frame_loop_test) return 1;
-    if (loop_runtime == "rever-presenter") SetEnvironmentVariableA("OFXR_REVER_PRESENTER", "1");
+    const bool rever_split_presenter = loop_runtime == "rever-presenter-split";
+    if (loop_runtime == "rever-presenter" || rever_split_presenter)
+        SetEnvironmentVariableA("OFXR_REVER_PRESENTER", "1");
+    if (rever_split_presenter) SetEnvironmentVariableA("OFXR_REVER_PRESENTER_SPLIT", "1");
     const std::string marker_mode =
         argc == 4 && !pause_test && !pipelined_pause_test && !overlay_test && !reload_test &&
         !frame_loop_test ? argv[3] : "";
@@ -204,9 +211,10 @@ int main(int argc, char** argv) {
             if (pacing_test)
                 ini << "\ndeep_pipeline=" << (pacing_depth != "shallow" ? 1 : 0)
                     << "\ntriple_frame_gen=" << (pacing_depth == "triple" ? 1 : 0);
-            ini // The hand-off and the pacing are read back from the flight log.
+            ini // The hand-off, the split presenter and the pacing are read back from the flight log.
                 << "\n[diagnostics]\nlogging_enabled="
-                << (pacing_test || handoff_loop || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
+                << (pacing_test || handoff_loop || rever_split_presenter || marker_mode == "on" ||
+                    marker_mode == "hidden" ? 1 : 0)
                 << "\nmax_file_mb=" << (pacing_test ? 256 : 32)
                 << "\n[overlay]\nposition=" << (!marker_mode.empty() && marker_mode != "hidden" ? "upper_right" : "off") << '\n';
         }
@@ -670,8 +678,60 @@ int main(int argc, char** argv) {
                       << presenter_at << std::endl;
             const bool decided_by_shape = loop_runtime != "other";
             const bool always_inline = loop_runtime == "rever" || loop_runtime == "rever-d3d11";
+            // Rever VR: OFXR_REVER_PRESENTER_SPLIT=1 takes a split loop as a one-thread one.
+            const bool split_stays_inline = split_loop && !rever_split_presenter;
             if (!decided_by_shape && start_paused) return 1; // not a scenario
-            if (decided_by_shape && !split_loop && !always_inline)
+            if (rever_split_presenter) {
+                // Lone Echo 2 plays for minutes on its split loop: a while
+                // longer, each end still on a thread of its own. The fake
+                // runtime fails the presenter's first pair, and the quarantine
+                // that follows stops it for a second (603, from the end
+                // thread of the moment, joining the presenter's thread); it
+                // has to come back on the split loop each time, never demoted.
+                int on_presenter = 0;
+                int later_frames = 0;
+                if (split_loop) {
+                    const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+                    while (std::chrono::steady_clock::now() < until) {
+                        if (frame(false, "split frame on the presenter") == kFakeDisplayPeriod * 2) ++on_presenter;
+                        ++later_frames;
+                        Sleep(5);
+                    }
+                }
+                // The latch (600), the request by the switch (607: c the
+                // binding, D3D12) and the start on a split loop (602: c 1) -
+                // or, for a one-thread loop, neither the latch nor the switch.
+                std::string log;
+                for (const auto& entry : std::filesystem::directory_iterator(root)) {
+                    if (entry.path().extension() != L".log") continue;
+                    std::ifstream stream(entry.path(), std::ios::binary);
+                    log.assign(std::istreambuf_iterator<char>(stream), {});
+                }
+                const auto count = [&](const char* selector, const char* fields) {
+                    int found = 0;
+                    const std::string key = std::string("op=presenter_transition result=") + selector + ' ';
+                    for (auto at = log.find(key); at != std::string::npos; at = log.find(key, at + 1)) {
+                        const auto line_end = log.find('\n', at);
+                        if (log.substr(at, line_end - at).find(fields) != std::string::npos) ++found;
+                    }
+                    return found;
+                };
+                std::cout << "frame loop " << loop_runtime << (split_loop ? " split" : " single") << ": "
+                          << count("602", "") << " starts (" << count("602", " c=1") << " on the split loop), "
+                          << count("607", "") << " by the switch, " << count("603", "") << " stopped, "
+                          << count("604", "") << " demoted; " << on_presenter << " of " << later_frames
+                          << " later frames on the presenter" << std::endl;
+                if (split_loop) {
+                    require(count("600", "") == 1 && count("607", " c=2") >= 1 && count("602", " c=1") >= 1,
+                        "the split loop latches and takes the presenter by OFXR_REVER_PRESENTER_SPLIT");
+                    require(count("603", "") >= 1 && count("607", " c=2") >= 2 && count("602", " c=1") >= 2 &&
+                            count("604", "") == 0,
+                        "a presenter a pass-through stopped comes back on the split loop");
+                } else
+                    require(count("600", "") == 0 && count("607", "") == 0 && count("602", " c=0") >= 1,
+                        "a one-thread loop takes the presenter without the split switch");
+            }
+            if (decided_by_shape && !split_stays_inline && !always_inline)
                 // Requested on the first generating frame, started by the next,
                 // seen by the application at the wait after that.
                 require(presenter_at >= 0 && presenter_at <= 6,
