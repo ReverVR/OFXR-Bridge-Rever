@@ -175,8 +175,11 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::process_identity:
         return true;
     case BridgeFlightOperation::presenter_transition:
-        return (result >= 600 && result <= 604) ||
-            (result >= 700 && result < 800);
+        // Rever VR: 607 / 608 (a split loop on the presenter, V5772 / V5773)
+        // too - written once a presenter start, and a log that had wrapped
+        // began without them, so its summary read "0 by the switch".
+        return (result >= 600 && result <= 604) || result == 607 ||
+            result == 608 || (result >= 700 && result < 800);
     default:
         return false;
     }

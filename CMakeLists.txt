@@ -2,10 +2,11 @@ cmake_minimum_required(VERSION 3.24)
 
 # Rever VR's fork of v0.2.14.3 (V577): its own build number, so its RuntimeLayer\v5771 folder
 # never collides with the official v577 one when both are installed.
-# Branch rever-0.2.14.3-le2-split: V5772, Lone Echo 2's build (OFXR_REVER_PRESENTER_SPLIT). The tray
-# copies the layer into RuntimeLayer\v<minor>, so a second build at 5771 would overwrite the runtime
-# copy of V5771, the build Alien: Isolation is sealed with.
-project(XRFrameGenerationBridge VERSION 0.5772.0 LANGUAGES CXX)
+# Branch rever-0.2.14.3-le2-split: Lone Echo 2's builds (OFXR_REVER_PRESENTER_SPLIT), V5772 and since
+# KB LE2-055 V5773 (the split loop handed the runtime's own timing on the presenter). The tray copies the
+# layer into RuntimeLayer\v<minor>, so a build at 5771 would overwrite the runtime copy of V5771, the
+# build Alien: Isolation is sealed with, and each LE2 build has a folder of its own.
+project(XRFrameGenerationBridge VERSION 0.5773.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -945,16 +946,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # second, not at three (33), which is what waiting for a pop the
         # pipeline holds back on purpose cost on SteamVR and Virtual Desktop.
         # A D3D11 session holds at admission, which must never hold for good.
+        # Rever VR (V5773, KB LE2-055): Lone Echo 2's split loop through Revive
+        # on Rever Streamer's presenter, ending each frame 0.8 of the period it
+        # was handed after its display time's wait: about 50 a second on the
+        # runtime's own timing, 25 on V5772's virtual one.
         # Wall-clock timing, so they carry needs_gpu_timing.
         foreach(case
                 "steamvr;deep" "virtual-desktop;deep"
-                "steamvr;deep-d3d11" "virtual-desktop;deep-d3d11")
+                "steamvr;deep-d3d11" "virtual-desktop;deep-d3d11" "rever;deep-revive")
             string(REPLACE ";" "_" case_name "${case}")
             add_test(NAME xrfg_release_pacing_${case_name} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> pacing ${case} 3 3 --min-fps=40)
             set_tests_properties(xrfg_release_pacing_${case_name} PROPERTIES
                 TIMEOUT 60 LABELS needs_gpu_timing)
         endforeach()
+        # The same at 3X: about 33 a second, one a virtual period (V5772: 12).
+        add_test(NAME xrfg_release_pacing_rever_triple-revive COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> pacing rever triple-revive 3 3 --min-fps=28)
+        set_tests_properties(xrfg_release_pacing_rever_triple-revive PROPERTIES
+            TIMEOUT 60 LABELS needs_gpu_timing)
         # The flight recorder switched on, off and on again in a running
         # session: the session records from before the switch head the file.
         add_test(NAME xrfg_layer_live_recorder COMMAND xrfg_layer_manual_disarm_tests

@@ -938,6 +938,9 @@ struct SessionState {
     // swapchain created later in play - CheekyFoveatedDLSS's menu - left it
     // inline for the rest of the session. Cleared by any presenter start.
     bool presenter_restore_after_bypass{}; // frame_call_mutex
+    // Rever VR: 608 recorded for this presenter (a split loop handed the
+    // runtime's timing, V5773). Cleared by any presenter start.
+    bool presenter_split_timing_recorded{}; // presenter_mutex
     std::atomic<bool> menu_enabled{true};
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
@@ -1855,6 +1858,16 @@ void signal_join_probe(
     return state.single_threaded_d3d11 ||
         (state.graphics_binding == SessionGraphicsBinding::d3d11 &&
          state.split_frame_loop);
+}
+
+// Rever VR: a split loop on a D3D12 session with OFXR_REVER_PRESENTER_SPLIT
+// (Dispatch::rever_presenter_split): it takes the presenter as a one-thread
+// loop does (frame_loop_takes_presenter, V5772) and, on it, is handed the
+// runtime's own timing (the virtual wait, V5773). frame_call_mutex held.
+[[nodiscard]] bool rever_split_presenter_timing(const SessionState& state) noexcept {
+    return state.split_frame_loop && state.dispatch &&
+        state.dispatch->rever_presenter_split &&
+        state.graphics_binding == SessionGraphicsBinding::d3d12;
 }
 
 // Inside xrEndFrame, and inside each swapchain image call, the runtime drives
@@ -6022,6 +6035,9 @@ XrResult layer_wait_frame_impl(
     const bool use_continuous_presenter = continuous_presenter_active(state);
     bool use_provisional_pipelined_wait = false;
     bool forwarded_application_wait = false;
+    // Rever VR: the virtual period a split loop's first wait on this presenter
+    // was not handed (608, recorded once the presenter's lock is let go).
+    XrDuration split_timing_record = 0;
     if (!use_continuous_presenter && state->application_frame_in_progress) {
         if (!state->application_frame_has_overlapping_wait) {
             state->application_frame_has_overlapping_wait = true;
@@ -6103,17 +6119,41 @@ XrResult layer_wait_frame_impl(
             : state->presenter_frame_state.predictedDisplayPeriod;
         state->application_timeline_period.store(
             runtime_period, std::memory_order_relaxed);
-        const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
+        const XrDuration paired_period = (state->manual_control.stop_requested() || !state->menu_enabled)
             ? runtime_period
             : virtual_display_period(
                 runtime_period,
                 state->frames_per_application_frame);
+        // Rever VR (V5773, KB LE2-055): a split loop on the presenter by
+        // OFXR_REVER_PRESENTER_SPLIT is handed what an inline wait hands it -
+        // the runtime's own period, and the time of the frame the presenter
+        // has just waited for - instead of the virtual period and a time one
+        // virtual period ahead. Lone Echo 2 through Revive (whose refresh rate
+        // and VsyncToNextVsync are this period) calls xrEndFrame about 0.8 of
+        // the period it was handed after that time, whatever its frame costs:
+        // inline, 5.3 ms after its wait at 144 Hz; on V5772's virtual timeline
+        // at 4X, 49 ms, so each of its frames took two virtual periods - 17
+        // real a second, "muy trabado" (2026-11-07). The presenter submits
+        // every frame at its own wait's time, and the synthetics' fractions
+        // run on the runtime's period and the spacing of these times, so
+        // neither changes; the real frame is shown up to a pair later than
+        // the time it was rendered for, which the runtime's reprojection of
+        // the frame's own pose covers, as inline it covers one period.
+        const bool rever_split_timing = rever_split_presenter_timing(*state);
+        const XrDuration virtual_period =
+            rever_split_timing ? runtime_period : paired_period;
         // The application's timeline is anchored to the runtime's own
         // prediction, one virtual period ahead of the frame the presenter is
-        // about to submit.
-        const XrTime anchor = add_display_duration(
-            state->presenter_frame_state.predictedDisplayTime,
-            virtual_period);
+        // about to submit (a split loop's, above: that frame's own time).
+        const XrTime anchor = rever_split_timing
+            ? state->presenter_frame_state.predictedDisplayTime
+            : add_display_duration(
+                state->presenter_frame_state.predictedDisplayTime,
+                virtual_period);
+        if (rever_split_timing && !state->presenter_split_timing_recorded) {
+            state->presenter_split_timing_recorded = true;
+            split_timing_record = paired_period;
+        }
         // A second wait inside one presenter frame has to come back later than
         // the first, so the guard below steps off the last time served. That
         // step invents time the runtime never advanced, and the ceiling is
@@ -6241,6 +6281,17 @@ XrResult layer_wait_frame_impl(
             forwarded_application_wait = true;
             state->runtime_frame_waited_unbegun = true;
         }
+    }
+    if (split_timing_record != 0 && frame_state != nullptr) {
+        // 608 (Rever VR, V5773): the first wait of a split loop on this
+        // presenter was handed the runtime's own timing. a the period handed,
+        // b the virtual period it was not, c the graphics binding.
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            608,
+            static_cast<std::uint64_t>(frame_state->predictedDisplayPeriod),
+            static_cast<std::uint64_t>(split_timing_record),
+            static_cast<std::uint64_t>(state->graphics_binding));
     }
     if (XR_SUCCEEDED(result) && frame_state != nullptr) {
         // The real frame's held-back copy goes out here, at frame start, so
@@ -11185,6 +11236,7 @@ void continuous_presenter_main(
             state->presenter_last_frame = std::move(seed_frame);
         }
         state->presenter_frame_state_valid = false;
+        state->presenter_split_timing_recorded = false;
         // Sequences and counts restart with the presenter; a pop, an enqueue
         // or a count from a previous one would release the first hold of this
         // one straight away or never. The release phase is kept: it describes
@@ -14117,9 +14169,7 @@ struct InternalCycleResult {
 // switch; a the end thread, c the graphics binding.
 [[nodiscard]] bool frame_loop_takes_presenter(
     const std::shared_ptr<SessionState>& state) noexcept {
-    const bool rever_split = state->split_frame_loop &&
-        state->dispatch->rever_presenter_split &&
-        state->graphics_binding == SessionGraphicsBinding::d3d12;
+    const bool rever_split = rever_split_presenter_timing(*state);
     if (!state->dispatch->inline_unless_pipelined ||
         (state->dispatch->rever_streamer_runtime &&
          (state->d3d11_device != nullptr || !state->dispatch->rever_presenter)) ||

@@ -47,11 +47,14 @@ $holds = @{ 400 = 0; 401 = 0; 402 = 0 }
 # a threshold (20-720).
 $brakeEngagements = 0
 # Rever VR (KB LE2-052): the frame loop's shape and the presenter's starts - 600 the split loop latched, 602 a start
-# (c 1 on a split loop), 603 / 604 a stop / demotion, 607 a split loop let onto it by OFXR_REVER_PRESENTER_SPLIT (V5772).
+# (c 1 on a split loop), 603 / 604 a stop / demotion, 607 a split loop let onto it by OFXR_REVER_PRESENTER_SPLIT (V5772),
+# 608 that loop handed the runtime's own timing on the presenter (V5773, KB LE2-055).
 $splitLatchMs = $null
 $presenterStarts = 0
 $splitPresenterStarts = 0
 $splitPresenterGrants = 0
+$splitTimingStarts = 0
+$splitTimingPeriodMs = $null
 $presenterStops = 0
 $brakeTunings = [System.Collections.Generic.List[object]]::new()
 $gpuTunings = [System.Collections.Generic.List[object]]::new()
@@ -183,11 +186,12 @@ Get-Content -LiteralPath $resolved | ForEach-Object {
                      $entry.C -le 720 -and $entry.B -ge $entry.C))) {
                 $brakeEngagements++
             }
-            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -in @(600, 602, 603, 604, 607)) {
+            if ($entry.Operation -eq 'presenter_transition' -and [int]$entry.Result -in @(600, 602, 603, 604, 607, 608)) {
                 switch ([int]$entry.Result) {
                     600 { if ($null -eq $splitLatchMs) { $splitLatchMs = $entry.Milliseconds } }
                     602 { $presenterStarts++; if ($entry.C -eq 1) { $splitPresenterStarts++ } }
                     607 { $splitPresenterGrants++ }
+                    608 { $splitTimingStarts++; $splitTimingPeriodMs = $entry.A / 1e6 }
                     default { $presenterStops++ }
                 }
             }
@@ -360,6 +364,10 @@ if ($endFrameBegins.Count -gt 0) {
     Write-Output ("  frame loop: {0}; presenter started {1} times (602), {2} of them on the split loop, {3} by OFXR_REVER_PRESENTER_SPLIT (607); stopped or demoted {4} times (603 / 604)" -f
         $(if ($null -ne $splitLatchMs) { 'split, latched at {0:N1} s (600)' -f ($splitLatchMs / 1000.0) } else { 'one thread' }),
         $presenterStarts, $splitPresenterStarts, $splitPresenterGrants, $presenterStops)
+    if ($splitTimingStarts -gt 0) {
+        Write-Output ("  split timing (608): the split loop handed the runtime's own period, {0:N2} ms, on {1} presenter start(s)" -f
+            $splitTimingPeriodMs, $splitTimingStarts)
+    }
 
     # Rever VR (KB ALI-079, ALI-082)
     if ($brakeTunings.Count -gt 0) {

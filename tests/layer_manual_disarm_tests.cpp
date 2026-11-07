@@ -84,17 +84,32 @@ int main(int argc, char** argv) {
     const std::string pacing_log_copy = pacing_min_given ? "" : pacing_last;
     // Suffixes: -d3d11, a D3D11 session on the direct interop; -pipelined,
     // the application waits for its next frame before it ends this one, as
-    // MSFS 2024 does, which takes the pipelined presenter.
+    // MSFS 2024 does, which takes the pipelined presenter; -revive (Rever
+    // VR, KB LE2-055, runtime "rever" only): Lone Echo 2 through Revive -
+    // the wait and the begin on this thread, the end from a thread of its
+    // own, called 0.8 of the period it was handed after the moment a
+    // runtime wait predicting its display time returns, whatever the frame
+    // costs (inline, 5.3 ms after its wait at 144 Hz; on V5772's virtual
+    // timeline at 4X, 49 ms). "rever" is Rever Streamer's runtime with
+    // OFXR_REVER_PRESENTER=1 and OFXR_REVER_PRESENTER_SPLIT=1.
     const bool pacing_d3d11 = pacing_shape.find("-d3d11") != std::string::npos;
     const bool pacing_pipelined = pacing_shape.find("-pipelined") != std::string::npos;
+    const bool pacing_revive = pacing_shape.find("-revive") != std::string::npos;
     const std::string pacing_depth = pacing_shape.substr(0, pacing_shape.find('-'));
     if (pacing_test && ((pacing_runtime != "steamvr" && pacing_runtime != "virtual-desktop" &&
-        pacing_runtime != "pimax") ||
+        pacing_runtime != "pimax" && pacing_runtime != "rever") ||
         (pacing_depth != "deep" && pacing_depth != "shallow" && pacing_depth != "triple") ||
         pacing_seconds <= 0.0 || pacing_game_ms < 0.0 || pacing_gpu_ms < 0.0 ||
-        (pacing_d3d11 && pacing_gpu_ms > 0.0))) return 1;
+        (pacing_d3d11 && pacing_gpu_ms > 0.0) ||
+        (pacing_revive != (pacing_runtime == "rever")) ||
+        (pacing_revive && (pacing_d3d11 || pacing_pipelined || pacing_gpu_ms > 0.0)))) return 1;
     if (pacing_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (pacing_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
+    else if (pacing_runtime == "rever") {
+        g_runtime_name_override = "Rever Streamer";
+        SetEnvironmentVariableA("OFXR_REVER_PRESENTER", "1");
+        SetEnvironmentVariableA("OFXR_REVER_PRESENTER_SPLIT", "1");
+    }
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
@@ -575,11 +590,43 @@ int main(int argc, char** argv) {
             };
             XrFrameState pipelined_next{XR_TYPE_FRAME_STATE};
             bool pipelined_started = false;
+            // -revive: when the fake's paced wait predicting this display
+            // time returns (it predicts the scanout two slots on), plus 0.8 of
+            // the period the game was handed.
+            const auto revive_end_at = [&](const XrFrameState& state) {
+                Clock::time_point epoch{};
+                {
+                    std::scoped_lock lock(g_paced_mutex);
+                    epoch = g_paced_epoch;
+                }
+                return epoch +
+                    std::chrono::nanoseconds(
+                        state.predictedDisplayTime - 1'000'000'000LL - 2 * kFakeDisplayPeriod) +
+                    std::chrono::nanoseconds(state.predictedDisplayPeriod * 8 / 10);
+            };
+            bool last_wait_virtual = false;
             const auto frame = [&] {
                 XrFrameState state{XR_TYPE_FRAME_STATE};
+                const auto runtime_waits = g_application_thread_waits.load();
                 if (pacing_pipelined && pipelined_started) state = pipelined_next;
                 else require(XR_SUCCEEDED(wait(session, nullptr, &state)), "paced wait");
+                last_wait_virtual = g_application_thread_waits.load() == runtime_waits;
                 require(XR_SUCCEEDED(begin(session, nullptr)), "paced begin");
+                if (pacing_revive) {
+                    std::exception_ptr failure;
+                    std::thread end_thread([&] {
+                        try {
+                            capture();
+                            sleep_until_precise(Clock::now() + game);
+                            sleep_until_precise(std::max(Clock::now(), revive_end_at(state)));
+                            submit(state.predictedDisplayTime);
+                        } catch (...) { failure = std::current_exception(); }
+                    });
+                    end_thread.join();
+                    if (failure) std::rethrow_exception(failure);
+                    progress.store(Clock::now().time_since_epoch().count());
+                    return state.predictedDisplayPeriod;
+                }
                 capture();
                 sleep_until_precise(Clock::now() + game);
                 // A game submits most of its frame's GPU work as it finishes
@@ -601,8 +648,12 @@ int main(int argc, char** argv) {
             double elapsed = 0.0;
             std::uint32_t synthetics = 0;
             try {
+                // A split loop on the presenter is handed the runtime's own
+                // period since V5773: the presenter is told by the waits that
+                // no longer reach the runtime.
                 for (int i = 0; i < 400 && presenter_at < 0; ++i)
-                    if (frame() == presenter_period) presenter_at = i;
+                    if (frame() == presenter_period || (pacing_revive && last_wait_virtual))
+                        presenter_at = i;
                 // A second for the presenter's grid and the hold to settle.
                 const auto settled = Clock::now() + std::chrono::seconds(1);
                 while (Clock::now() < settled) frame();
@@ -640,9 +691,16 @@ int main(int argc, char** argv) {
             // shape. The fake runtime does not block a wait, so every inline
             // pair is bunched: the evidence that used to promote any session
             // after thirty of them.
+            // Whether the last wait was the presenter's: none of the
+            // application thread's waits reached the runtime. A split loop
+            // on it by OFXR_REVER_PRESENTER_SPLIT is handed the runtime's own
+            // period since V5773, so the period no longer tells.
+            bool last_wait_virtual = false;
             const auto frame = [&](bool expect_native, const char* what) {
                 XrFrameState state{XR_TYPE_FRAME_STATE};
+                const auto runtime_waits = g_application_thread_waits.load();
                 require(XR_SUCCEEDED(wait(session, nullptr, &state)), what);
+                last_wait_virtual = g_application_thread_waits.load() == runtime_waits;
                 if (expect_native)
                     require(state.predictedDisplayPeriod == kFakeDisplayPeriod, what);
                 require(XR_SUCCEEDED(begin(session, nullptr)), what);
@@ -668,10 +726,18 @@ int main(int argc, char** argv) {
             }
             // Past the thirty pairs the bunched-pair detector needs.
             int presenter_at = -1;
+            const bool split_on_switch = rever_split_presenter && split_loop;
+            bool split_handed_native = true;
             for (int i = 0; i < 45; ++i) {
                 const XrDuration period = frame(false, "generating frame");
-                if (presenter_at < 0 && period == kFakeDisplayPeriod * 2) presenter_at = i;
+                if (split_on_switch && last_wait_virtual && period != kFakeDisplayPeriod)
+                    split_handed_native = false;
+                if (presenter_at < 0 &&
+                    (period == kFakeDisplayPeriod * 2 || (split_on_switch && last_wait_virtual)))
+                    presenter_at = i;
             }
+            require(split_handed_native,
+                "a split loop on the presenter is handed the runtime's own period (V5773)");
             require(g_synthetic_release_calls.load() > 0, "generation ran");
             std::cout << "frame loop " << loop_runtime << (split_loop ? " split" : " single")
                       << (start_paused ? " paused" : "") << ": presenter at frame "
@@ -693,7 +759,12 @@ int main(int argc, char** argv) {
                 if (split_loop) {
                     const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
                     while (std::chrono::steady_clock::now() < until) {
-                        if (frame(false, "split frame on the presenter") == kFakeDisplayPeriod * 2) ++on_presenter;
+                        const XrDuration period = frame(false, "split frame on the presenter");
+                        if (last_wait_virtual) {
+                            ++on_presenter;
+                            require(period == kFakeDisplayPeriod,
+                                "a split loop on the presenter is handed the runtime's own period (V5773)");
+                        }
                         ++later_frames;
                         Sleep(5);
                     }
@@ -724,12 +795,23 @@ int main(int argc, char** argv) {
                 if (split_loop) {
                     require(count("600", "") == 1 && count("607", " c=2") >= 1 && count("602", " c=1") >= 1,
                         "the split loop latches and takes the presenter by OFXR_REVER_PRESENTER_SPLIT");
-                    require(count("603", "") >= 1 && count("607", " c=2") >= 2 && count("602", " c=1") >= 2 &&
-                            count("604", "") == 0,
-                        "a presenter a pass-through stopped comes back on the split loop");
+                    // V5772: the fake failed the presenter's first pair on the
+                    // virtual timeline and the quarantine stopped it, three
+                    // times in the run, each given back. On the runtime's own
+                    // timing (V5773) that pair goes through and nothing stops
+                    // it. Either way never demoted, and every stop given back.
+                    const int stops = count("603", "");
+                    require(count("604", "") == 0 &&
+                            (stops == 0 ? on_presenter == later_frames
+                                        : count("607", " c=2") > stops && count("602", " c=1") > stops),
+                        "the split loop stays on the presenter, or comes back to it after each stop");
+                    // 608: the runtime's period handed, once a presenter start.
+                    require(count("608", " a=10000000 b=20000000 c=2") >= 1,
+                        "the split loop is handed the runtime's timing on the presenter (608)");
                 } else
-                    require(count("600", "") == 0 && count("607", "") == 0 && count("602", " c=0") >= 1,
-                        "a one-thread loop takes the presenter without the split switch");
+                    require(count("600", "") == 0 && count("607", "") == 0 && count("608", "") == 0 &&
+                            count("602", " c=0") >= 1,
+                        "a one-thread loop takes the presenter, its virtual timing and no split switch");
             }
             if (decided_by_shape && !split_stays_inline && !always_inline)
                 // Requested on the first generating frame, started by the next,

@@ -40,6 +40,12 @@
 >   loop on a D3D12 session take the presenter as a one-thread loop does.
 >   Lone Echo 2 through Revive waits and begins on one thread and ends its
 >   frames from a pool of others, so it ran inline. Off unless set to 1.
+>   **V5773** (`RuntimeLayer\v5773`): on the presenter, such a loop's
+>   `xrWaitFrame` hands back the runtime's own period and the time of the
+>   frame the presenter has just waited for, as an inline wait would, not the
+>   virtual period and a time one virtual period ahead. Lone Echo 2 ends each
+>   frame about 0.8 of the period it is handed after that time, so on V5772
+>   at 4X its frames took two virtual periods (17 real a second).
 >
 > License unchanged: LGPL-3.0-or-later.
 
