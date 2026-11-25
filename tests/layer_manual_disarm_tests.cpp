@@ -87,14 +87,26 @@ int main(int argc, char** argv) {
     // MSFS 2024 does, which takes the pipelined presenter.
     const bool pacing_d3d11 = pacing_shape.find("-d3d11") != std::string::npos;
     const bool pacing_pipelined = pacing_shape.find("-pipelined") != std::string::npos;
+    // Rever VR (2026-11-16): -fill, OFXR_REVER_FILL=1 in the session's environment (the game at up to the display
+    // rate, a synthetic only for the slots it misses); -truetime, OFXR_REVER_TRUE_TIME=1 (the time handed out is the
+    // one its real frame is measured to go out at, flight log 880). Runtime "rever": Rever Streamer's, with
+    // OFXR_REVER_PRESENTER=1, as on Virtual Desktop on a D3D12 session.
+    const bool pacing_fill = pacing_shape.find("-fill") != std::string::npos;
+    const bool pacing_true_time = pacing_shape.find("-truetime") != std::string::npos;
     const std::string pacing_depth = pacing_shape.substr(0, pacing_shape.find('-'));
     if (pacing_test && ((pacing_runtime != "steamvr" && pacing_runtime != "virtual-desktop" &&
-        pacing_runtime != "pimax") ||
+        pacing_runtime != "pimax" && pacing_runtime != "rever") ||
         (pacing_depth != "deep" && pacing_depth != "shallow" && pacing_depth != "triple") ||
         pacing_seconds <= 0.0 || pacing_game_ms < 0.0 || pacing_gpu_ms < 0.0 ||
         (pacing_d3d11 && pacing_gpu_ms > 0.0))) return 1;
     if (pacing_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (pacing_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
+    else if (pacing_runtime == "rever") {
+        g_runtime_name_override = "Rever Streamer";
+        SetEnvironmentVariableA("OFXR_REVER_PRESENTER", "1");
+    }
+    if (pacing_fill) SetEnvironmentVariableA("OFXR_REVER_FILL", "1");
+    if (pacing_true_time) SetEnvironmentVariableA("OFXR_REVER_TRUE_TIME", "1");
     // "pause" as the third argument drives the tray's reversible pause in
     // place of the Disarm, and resumes afterwards.
     const bool pause_test = argc == 4 && std::string(argv[3]) == "pause";
@@ -123,7 +135,10 @@ int main(int argc, char** argv) {
     // "rever" (Rever VR): Rever Streamer's runtime inline on a D3D12 session
     // (the D3D11 bridge's) and, "rever-d3d11", on the D3D11 interop - never by
     // the pairs; "rever-presenter", OFXR_REVER_PRESENTER=1: as Virtual
-    // Desktop on a D3D12 session.
+    // Desktop on a D3D12 session. Rever VR, KB GVX-058: "rever-presenter-ini",
+    // the same from [ofxr] rever_presenter=1 in the layer's ini (no
+    // environment: a game Steam starts again); "rever-d3d11-presenter-ini",
+    // that key on the D3D11 interop stays inline (the gate's guard holds).
     //
     const bool frame_loop_test = mode == "frame-loop";
     // "recorder": the flight recorder switched on, off and on again while a
@@ -138,7 +153,8 @@ int main(int argc, char** argv) {
     if (loop_runtime == "virtual-desktop") g_runtime_name_override = "VirtualDesktopXR (Bundled)";
     else if (loop_runtime == "pimax") g_runtime_name_override = "Pimax OpenXR";
     else if (loop_runtime == "other") g_runtime_name_override = "XRFG fake runtime";
-    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11" || loop_runtime == "rever-presenter")
+    else if (loop_runtime == "rever" || loop_runtime == "rever-d3d11" || loop_runtime == "rever-presenter" ||
+             loop_runtime == "rever-presenter-ini" || loop_runtime == "rever-d3d11-presenter-ini")
         g_runtime_name_override = "Rever Streamer";
     else if (frame_loop_test) return 1;
     if (loop_runtime == "rever-presenter") SetEnvironmentVariableA("OFXR_REVER_PRESENTER", "1");
@@ -153,7 +169,10 @@ int main(int argc, char** argv) {
     // The interop keeps the private rings; every D3D12 mode takes the
     // single-swapchain rings the shipped ini turns on.
     g_single_rings = mode != "d3d11";
-    if (frame_loop_test && loop_runtime == "rever-d3d11") {
+    const bool presenter_from_ini =
+        loop_runtime == "rever-presenter-ini" || loop_runtime == "rever-d3d11-presenter-ini";
+    if (presenter_from_ini) SetEnvironmentVariableA("OFXR_REVER_PRESENTER", nullptr);
+    if (frame_loop_test && (loop_runtime == "rever-d3d11" || loop_runtime == "rever-d3d11-presenter-ini")) {
         g_d3d11_interop_mode = true;
         g_single_rings = false;
     }
@@ -186,6 +205,9 @@ int main(int argc, char** argv) {
     int result = 1;
     try {
         std::filesystem::create_directories(root);
+        // Rever VR's notes (%LOCALAPPDATA%\ReverVR\ofxr_rescue.log, written with fill or the true display time on) go
+        // to this run's own folder, never the user's.
+        if (pacing_fill || pacing_true_time) SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
         const auto dll = root / L"OptiScaler.dll";
         std::filesystem::copy_file(argv[1], dll);
         signal = xrfg::implicit_layer::create_arm_signal(manifest);
@@ -204,6 +226,7 @@ int main(int argc, char** argv) {
             if (pacing_test)
                 ini << "\ndeep_pipeline=" << (pacing_depth != "shallow" ? 1 : 0)
                     << "\ntriple_frame_gen=" << (pacing_depth == "triple" ? 1 : 0);
+            if (presenter_from_ini) ini << "\nrever_presenter=1";
             ini // The hand-off and the pacing are read back from the flight log.
                 << "\n[diagnostics]\nlogging_enabled="
                 << (pacing_test || handoff_loop || marker_mode == "on" || marker_mode == "hidden" ? 1 : 0)
@@ -593,8 +616,16 @@ int main(int argc, char** argv) {
             double elapsed = 0.0;
             std::uint32_t synthetics = 0;
             try {
-                for (int i = 0; i < 400 && presenter_at < 0; ++i)
-                    if (frame() == presenter_period) presenter_at = i;
+                // Under fill the presenter hands out the display's own period: it is told by the waits that no longer
+                // reach the runtime from the application's thread.
+                for (int i = 0; i < 400 && presenter_at < 0; ++i) {
+                    const auto runtime_waits = g_application_thread_waits.load();
+                    const XrDuration handed = frame();
+                    if (pacing_fill ? handed == kFakeDisplayPeriod && i > 0 &&
+                                          g_application_thread_waits.load() == runtime_waits
+                                    : handed == presenter_period)
+                        presenter_at = i;
+                }
                 // A second for the presenter's grid and the hold to settle.
                 const auto settled = Clock::now() + std::chrono::seconds(1);
                 while (Clock::now() < settled) frame();
@@ -669,7 +700,8 @@ int main(int argc, char** argv) {
                       << (start_paused ? " paused" : "") << ": presenter at frame "
                       << presenter_at << std::endl;
             const bool decided_by_shape = loop_runtime != "other";
-            const bool always_inline = loop_runtime == "rever" || loop_runtime == "rever-d3d11";
+            const bool always_inline = loop_runtime == "rever" || loop_runtime == "rever-d3d11" ||
+                loop_runtime == "rever-d3d11-presenter-ini";
             if (!decided_by_shape && start_paused) return 1; // not a scenario
             if (decided_by_shape && !split_loop && !always_inline)
                 // Requested on the first generating frame, started by the next,

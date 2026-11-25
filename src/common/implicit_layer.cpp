@@ -500,6 +500,23 @@ bool read_binding_queue(
     }
 }
 
+bool read_rever_binding_queue_high(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_REVER_BINDING_QUEUE_HIGH")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"rever_binding_queue_high", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool read_presenter_from_start(
     const std::filesystem::path& module_directory) noexcept {
     try {
@@ -532,6 +549,122 @@ bool read_dynamic_frame_gen(
     } catch (...) {
         return false;
     }
+}
+
+bool read_rescue_frame_gen(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_REVER_RESCUE")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"rescue", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_true_time(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_REVER_TRUE_TIME")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"true_time", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_rever_presenter(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        // the game's environment first, exactly as before (the first character '1')
+        char presenter[8]{};
+        if (GetEnvironmentVariableA("OFXR_REVER_PRESENTER", presenter, sizeof presenter) > 0 &&
+            presenter[0] == '1') {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"rever_presenter", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_fill_frame_gen(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_REVER_FILL")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"fill", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_fill_dynamic(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_REVER_FILL_DYNAMIC")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"fill_dynamic", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool read_rever_vram_guard(
+    const std::filesystem::path& module_directory) noexcept {
+    try {
+        if (rever_environment_flag(L"OFXR_REVER_VRAM_GUARD")) {
+            return true;
+        }
+        if (module_directory.empty()) {
+            return false;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(
+                   L"ofxr", L"rever_vram_guard", 0, ini_path.c_str()) != 0;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::uint32_t read_rever_vram_margin_mb(
+    const std::filesystem::path& module_directory) noexcept {
+    return rever_tuning_number(module_directory, L"OFXR_REVER_VRAM_MARGIN_MB", L"rever_vram_margin_mb", 1024, 256, 8192);
+}
+
+std::uint32_t read_rever_vram_budget_extra_mb(
+    const std::filesystem::path& module_directory) noexcept {
+    return rever_tuning_number(
+        module_directory, L"OFXR_REVER_VRAM_BUDGET_EXTRA_MB", L"rever_vram_budget_extra_mb", 0, 0, 65536);
 }
 
 std::vector<std::wstring> read_excluded_processes(

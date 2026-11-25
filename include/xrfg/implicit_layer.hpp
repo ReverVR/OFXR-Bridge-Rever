@@ -254,6 +254,15 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_binding_queue(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] rever_binding_queue_high` (Rever VR, KB GVX-061, 2026-11-24): the binding queue above made at
+// D3D12_COMMAND_QUEUE_PRIORITY_HIGH, as VectorXR makes the queue it gives the runtime
+// (framegen_runtime_queue.cpp): a generated frame's copy into the runtime's image and its release go ahead of
+// the game's queued work, not only beside it. Only where a binding queue is made; off unless set to 1, or
+// OFXR_REVER_BINDING_QUEUE_HIGH=1 in the application's environment (without it: NORMAL, exactly as before).
+// Read at xrCreateSession.
+[[nodiscard]] bool read_rever_binding_queue_high(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] presenter_from_start` (Rever VR): request the continuous presenter after the first
 // completed inline pair instead of waiting for a pacing signal. On Titanfall 2 + DLSS-NR the
 // signal only came after a level reload: until then the session stayed inline, the game held
@@ -269,6 +278,58 @@ struct ConfiguredNvidiaOptions {
 // frame_multiplier is then the ceiling, never below 3: 2X / 3X as before,
 // 2X / 3X / 4X when it says 4. Off unless set to 1. Read at xrCreateSession.
 [[nodiscard]] bool read_dynamic_frame_gen(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's frame generation as a rescue (OFXR_REVER_RESCUE=1 in the game's environment, or [ofxr] rescue=1;
+// xrfg/rescue_frame_gen.hpp, 2026-11-16): on an inline session, frames pass through (nothing invented, the game at the
+// display's pace) while the game keeps up by itself, and pair again once it cannot. Off unless set. Read at
+// xrCreateSession.
+[[nodiscard]] bool read_rescue_frame_gen(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's true display time (OFXR_REVER_TRUE_TIME=1 in the game's environment, or [ofxr] true_time=1;
+// xrfg/true_display_time.hpp, 2026-11-16): on a presenter session the application is handed the display time its real
+// frame is measured to go out at, not the presenter's prediction plus one virtual period. Off unless set. Read at
+// xrCreateSession.
+[[nodiscard]] bool read_true_time(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's continuous presenter on Rever Streamer's runtime (OFXR_REVER_PRESENTER=1 in the game's environment, or
+// [ofxr] rever_presenter=1 in the armed layer's ini; KB GVX-058, 2026-11-24): a game its store starts again without
+// Rever's environment (Microsoft Flight Simulator through Steam) gets it from the ini Rever's app writes at each arming.
+// Only the route changes: the presenter still needs the session the D3D11 bridge lifted to D3D12 (no D3D11 device) and
+// a one-thread frame loop (frame_loop_takes_presenter). Off unless set. Read at xrCreateInstance.
+[[nodiscard]] bool read_rever_presenter(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's fill (OFXR_REVER_FILL=1 in the game's environment, or [ofxr] fill=1; xrfg/fill_frame_gen.hpp,
+// 2026-11-16): on a presenter session the application is handed the display's period and runs at up to the display
+// rate; a frame pairs only when it came a slot or more late, with as many synthetics as slots it missed up to the
+// multiplier. Inline sessions are left as they are. Off unless set. Read at xrCreateSession.
+[[nodiscard]] bool read_fill_frame_gen(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's fill with the dynamic multiplier (OFXR_REVER_FILL_DYNAMIC=1 in the game's environment, or [ofxr]
+// fill_dynamic=1; xrfg/fill_frame_gen.hpp fill_in_force, 2026-11-20): under fill on a presenter session the multiplier
+// keeps its dynamic steps and fill is in force only at 2X; at 3X and 4X frames pair as without fill. Off unless set:
+// fill as before. Read at xrCreateSession.
+[[nodiscard]] bool read_fill_dynamic(
+    const std::filesystem::path& module_directory) noexcept;
+
+// Rever VR's video memory guard (xrfg/vram_guard.hpp, KB GVX-060, 2026-11-24): OFXR_REVER_VRAM_GUARD=1 in the game's
+// environment, or [ofxr] rever_vram_guard=1 in the armed layer's ini (Rever's app writes it for Microsoft Flight
+// Simulator, which Steam starts again without Rever's environment). Off unless set: the layer exactly as before. Read
+// at xrCreateSession.
+[[nodiscard]] bool read_rever_vram_guard(
+    const std::filesystem::path& module_directory) noexcept;
+// `[ofxr] rever_vram_margin_mb`: how far under the budget the guard acts, in MB (1024 by default, 256 to 8192;
+// OFXR_REVER_VRAM_MARGIN_MB in the game's environment wins, as gpu_margin's).
+[[nodiscard]] std::uint32_t read_rever_vram_margin_mb(
+    const std::filesystem::path& module_directory) noexcept;
+// `[ofxr] rever_vram_budget_extra_mb`: the MB Rever's runtime takes off the budget every DXGI caller of the process is
+// told (REVER_XR_VRAM_RESERVE_GB, KB GVX-058), added back by the guard so it judges Windows' own budget (0 by default,
+// 0 to 65536; OFXR_REVER_VRAM_BUDGET_EXTRA_MB wins).
+[[nodiscard]] std::uint32_t read_rever_vram_budget_extra_mb(
     const std::filesystem::path& module_directory) noexcept;
 
 // `[ofxr] excluded_processes`: executable names, separated by ';', in which

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 # Rever VR's fork of v0.2.14.3 (V577): its own build number, so its RuntimeLayer\v5771 folder
 # never collides with the official v577 one when both are installed.
-project(XRFrameGenerationBridge VERSION 0.5771.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.5775.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -97,6 +97,37 @@ if(XRFG_BUILD_TESTS)
         target_compile_definitions(xrfg_gpu_aware_multiplier_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     endif()
     add_test(NAME xrfg_gpu_aware_multiplier_tests COMMAND xrfg_gpu_aware_multiplier_tests)
+    # Rever VR's video memory guard (KB GVX-060)
+    add_executable(xrfg_vram_guard_tests tests/vram_guard_tests.cpp)
+    target_link_libraries(xrfg_vram_guard_tests PRIVATE xrfg_core)
+    if(MSVC)
+        target_compile_options(xrfg_vram_guard_tests PRIVATE /W4 /permissive- /EHsc)
+        target_compile_definitions(xrfg_vram_guard_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    add_test(NAME xrfg_vram_guard_tests COMMAND xrfg_vram_guard_tests)
+    # Rever VR's frame generation as a rescue (2026-11-16, Assassin's Creed Nexus)
+    add_executable(xrfg_rescue_frame_gen_tests tests/rescue_frame_gen_tests.cpp)
+    target_link_libraries(xrfg_rescue_frame_gen_tests PRIVATE xrfg_core)
+    if(MSVC)
+        target_compile_options(xrfg_rescue_frame_gen_tests PRIVATE /W4 /permissive- /EHsc)
+        target_compile_definitions(xrfg_rescue_frame_gen_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    add_test(NAME xrfg_rescue_frame_gen_tests COMMAND xrfg_rescue_frame_gen_tests)
+    # Rever VR's true display time and fill (2026-11-16, Assassin's Creed Nexus)
+    add_executable(xrfg_true_display_time_tests tests/true_display_time_tests.cpp)
+    target_link_libraries(xrfg_true_display_time_tests PRIVATE xrfg_core)
+    if(MSVC)
+        target_compile_options(xrfg_true_display_time_tests PRIVATE /W4 /permissive- /EHsc)
+        target_compile_definitions(xrfg_true_display_time_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    add_test(NAME xrfg_true_display_time_tests COMMAND xrfg_true_display_time_tests)
+    add_executable(xrfg_fill_frame_gen_tests tests/fill_frame_gen_tests.cpp)
+    target_link_libraries(xrfg_fill_frame_gen_tests PRIVATE xrfg_core)
+    if(MSVC)
+        target_compile_options(xrfg_fill_frame_gen_tests PRIVATE /W4 /permissive- /EHsc)
+        target_compile_definitions(xrfg_fill_frame_gen_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    endif()
+    add_test(NAME xrfg_fill_frame_gen_tests COMMAND xrfg_fill_frame_gen_tests)
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
     add_test(NAME xrfg_fps_overlay_tests COMMAND xrfg_fps_overlay_tests)
@@ -924,6 +955,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # the D3D11 interop, as Virtual Desktop with OFXR_REVER_PRESENTER=1.
         foreach(shape
                 "rever;single" "rever;split" "rever-d3d11;single" "rever-presenter;single"
+                "rever-presenter-ini;single" "rever-d3d11-presenter-ini;single"
                 "virtual-desktop;split" "virtual-desktop;split;paused"
                 "virtual-desktop;single" "virtual-desktop;single;paused"
                 "virtual-desktop;handoff"
@@ -947,6 +979,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             add_test(NAME xrfg_release_pacing_${case_name} COMMAND xrfg_layer_manual_disarm_tests
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> pacing ${case} 3 3 --min-fps=40)
             set_tests_properties(xrfg_release_pacing_${case_name} PROPERTIES
+                TIMEOUT 60 LABELS needs_gpu_timing)
+        endforeach()
+        # Rever VR's fill (OFXR_REVER_FILL=1, xrfg/fill_frame_gen.hpp, 2026-11-16) on Rever Streamer's runtime with
+        # OFXR_REVER_PRESENTER=1: a game of 3 ms runs at the display's 100 Hz, not at 2X's 50, with the true display
+        # time on as well; one of 13 ms (1.3 periods) runs at its own ~70, not at 50, the slots it misses filled.
+        foreach(case "rever;deep-fill;3;85" "rever;shallow-fill-truetime;3;85" "rever;deep-fill;13;58")
+            list(GET case 0 fill_runtime)
+            list(GET case 1 fill_shape)
+            list(GET case 2 fill_game)
+            list(GET case 3 fill_min)
+            add_test(NAME xrfg_release_pacing_${fill_runtime}_${fill_shape}_${fill_game}
+                COMMAND xrfg_layer_manual_disarm_tests
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> pacing ${fill_runtime} ${fill_shape}
+                ${fill_game} 3 --min-fps=${fill_min})
+            set_tests_properties(xrfg_release_pacing_${fill_runtime}_${fill_shape}_${fill_game} PROPERTIES
                 TIMEOUT 60 LABELS needs_gpu_timing)
         endforeach()
         # The flight recorder switched on, off and on again in a running

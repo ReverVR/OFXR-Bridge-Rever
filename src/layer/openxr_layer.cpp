@@ -19,6 +19,10 @@
 #include "xrfg/submit_margin.hpp"
 #include "xrfg/turn_brake.hpp"
 #include "xrfg/gpu_aware_multiplier.hpp"
+#include "xrfg/rescue_frame_gen.hpp"
+#include "xrfg/true_display_time.hpp"
+#include "xrfg/fill_frame_gen.hpp"
+#include "xrfg/vram_guard.hpp"
 
 #include <windows.h>
 #include <psapi.h>
@@ -63,6 +67,31 @@ void set_optiscaler_embedded_delegation(bool active) noexcept;
 namespace {
 
 [[nodiscard]] std::filesystem::path current_layer_directory() noexcept;
+
+// Rever VR's rescue (xrfg/rescue_frame_gen.hpp): one line in %LOCALAPPDATA%\ReverVR\ofxr_rescue.log - the rescue's own
+// record, written only when it is on (OFXR's flight log stays off in Rever's sessions: its every-frame writes cost
+// latency).
+void rever_rescue_note(const char* text) noexcept {
+    try {
+        wchar_t local[MAX_PATH] = {};
+        const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH) {
+            return;
+        }
+        const std::filesystem::path folder = std::filesystem::path(local) / L"ReverVR";
+        std::error_code ignored;
+        std::filesystem::create_directories(folder, ignored);
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, (folder / L"ofxr_rescue.log").c_str(), L"a") != 0 || file == nullptr) {
+            return;
+        }
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        std::fprintf(file, "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, text);
+        std::fclose(file);
+    } catch (...) {
+    }
+}
 
 namespace optiscaler_bootstrap {
 
@@ -1195,6 +1224,45 @@ struct SessionState {
     std::atomic<std::int64_t> dynamic_wait_returned_ns{};
     double dynamic_frame_ns{};
     std::chrono::steady_clock::time_point dynamic_hold_until{};
+    // Rever VR's frame generation as a rescue (read_rescue_frame_gen, xrfg/rescue_frame_gen.hpp): the decision and the
+    // last wait it took in, the xrEndFrame thread's (the wait thread only stamps dynamic_wait_returned_ns).
+    bool rescue_enabled{};
+    xrfg::RescueFrameGen rescue{};
+    std::int64_t rescue_seen_wait_ns{};
+    bool rescue_presenter_noted{};
+    std::int64_t rescue_status_at_ns{};
+    std::uint64_t rescue_frames{};
+    std::uint64_t rescue_passed{};
+    // Rever VR's true display time (read_true_time, xrfg/true_display_time.hpp) and fill (read_fill_frame_gen,
+    // xrfg/fill_frame_gen.hpp), presenter sessions only. The measurement is presenter_mutex's: the wait notes what it
+    // handed out, the presenter what it popped. The lead the wait used last and the 880 window are presenter_mutex's
+    // too; the tally, its second and the notes are the xrEndFrame thread's.
+    bool true_time_enabled{};
+    bool fill_enabled{};
+    // Rever VR's fill with the dynamic multiplier (read_fill_dynamic, xrfg/fill_frame_gen.hpp fill_in_force,
+    // 2026-11-20): the multiplier's dynamic steps kept, fill in force only in its shape at 2X. fill_dynamic is fixed for
+    // the session; fill_shape changes with the multiplier, on an idle presenter (apply_live_frame_multiplier), and is
+    // read by the wait and the presenter too. The rest is the xrEndFrame thread's: the shape's rule (the rescue's) and
+    // the last wait it took in, what it wants, the game's own frame of this frame and the one before, and the frames
+    // that paired as without fill in the current second and five seconds.
+    bool fill_dynamic{};
+    std::atomic<bool> fill_shape{false};
+    xrfg::RescueFrameGen fill_shape_rule{};
+    std::int64_t fill_shape_seen_wait_ns{};
+    bool fill_shape_wanted{};
+    std::int64_t fill_own_current_ns{};
+    std::int64_t fill_own_previous_ns{};
+    std::uint32_t fill_outside{};
+    std::uint32_t fill_outside_notes{};
+    xrfg::TrueDisplayTime true_time{};
+    XrDuration true_time_lead{};
+    std::uint32_t true_time_window_matched{};
+    std::uint32_t true_time_window_unmatched{};
+    bool fill_inline_noted{};
+    xrfg::FillTally fill_tally{};
+    xrfg::FillTally fill_tally_notes{};
+    std::int64_t fill_tally_at_ns{};
+    std::int64_t rever_timing_note_at_ns{};
     // Rever VR's turn brake (xrfg/turn_brake.hpp, KB ALI-079): the live keys, polled every quarter
     // second, and the brake's state, all the xrEndFrame thread's.
     std::chrono::steady_clock::time_point turn_brake_poll_at{};
@@ -1220,6 +1288,18 @@ struct SessionState {
     // The next periodic record. The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point video_memory_poll_at{};
     std::chrono::steady_clock::time_point video_memory_first_poll{};
+    // Rever VR's video memory guard (read_rever_vram_guard, xrfg/vram_guard.hpp, KB GVX-060): off unless [ofxr]
+    // rever_vram_guard=1, read at xrCreateSession. The guard, its cap (read by apply_live_frame_multiplier) and its
+    // ten-second note are the xrEndFrame thread's; xrCreateSwapchain, on whatever thread, only stamps a recreation of
+    // the projection's swapchains, which the next poll takes in.
+    bool vram_guard_enabled{};
+    xrfg::VramGuard vram_guard{};
+    std::atomic<std::int64_t> vram_guard_recreated_ns{};
+    std::int64_t vram_guard_recreation_seen_ns{};
+    std::int64_t vram_guard_note_at_ns{};
+    // The last release of replaced swapchains' generation (release_replaced_generation): at most one every 5 s, so a
+    // game that went back and forth between two sets would cost a re-arming every 5 s, never one every frame.
+    std::int64_t vram_guard_released_ns{};
     // projection_view_rect: the last rectangle recorded per swapchain, so
     // the record is written on change only. The application's xrEndFrame
     // thread only.
@@ -1653,6 +1733,15 @@ struct SessionState {
     // the order they are numbered.
     std::mutex join_probe_mutex;
 };
+
+// Rever VR's fill as the session runs it now (xrfg/fill_frame_gen.hpp fill_in_force): on, unless fill_dynamic is on and
+// the session is not in fill's shape at 2X, where frames pair as without fill. The multiplier and the shape only change
+// on an idle presenter with the swapchains drained (apply_live_frame_multiplier), so every thread reading this between
+// two changes sees one answer.
+[[nodiscard]] bool fill_in_force(const SessionState& state) noexcept {
+    return xrfg::fill_in_force(
+        state.fill_enabled, state.fill_dynamic, state.frames_per_application_frame.load(), state.fill_shape.load());
+}
 
 // The queue the runtime orders swapchain images against: the layer's own
 // binding queue where one was arranged, otherwise whatever the runtime was
@@ -2292,6 +2381,61 @@ enum class VideoMemoryStage : std::int64_t {
     staging = 11,
 };
 
+// The adapter the session's video memory is read from, found once from the
+// first device the session has (null while it has none, or for good when the
+// adapter cannot be found). Shared by the flight log's vram_usage records and
+// Rever VR's video memory guard.
+[[nodiscard]] Microsoft::WRL::ComPtr<IDXGIAdapter3> session_video_memory_adapter(
+    SessionState& session) {
+    std::scoped_lock lock(session.video_memory_mutex);
+    if (!session.video_memory_adapter && !session.video_memory_unavailable) {
+        LUID luid{};
+        bool found = false;
+        if (session.d3d12_device) {
+            luid = session.d3d12_device->GetAdapterLuid();
+            found = true;
+        } else if (session.d3d11_device) {
+            Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+            Microsoft::WRL::ComPtr<IDXGIAdapter> device_adapter;
+            DXGI_ADAPTER_DESC description{};
+            if (SUCCEEDED(session.d3d11_device.As(&dxgi_device)) &&
+                SUCCEEDED(dxgi_device->GetAdapter(&device_adapter)) &&
+                SUCCEEDED(device_adapter->GetDesc(&description))) {
+                luid = description.AdapterLuid;
+                found = true;
+            }
+        }
+        // No device yet: a later record finds one.
+        if (!found) {
+            return nullptr;
+        }
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
+            FAILED(factory->EnumAdapterByLuid(
+                luid, IID_PPV_ARGS(&session.video_memory_adapter)))) {
+            session.video_memory_adapter.Reset();
+            session.video_memory_unavailable = true;
+            return nullptr;
+        }
+    }
+    return session.video_memory_adapter;
+}
+
+// Rever VR's video memory guard (KB GVX-060): the process's use of the
+// adapter's local memory and its budget, as DXGI answers them (a budget
+// Rever's runtime lowered included); false when they cannot be read.
+[[nodiscard]] bool query_local_video_memory(
+    SessionState& session, DXGI_QUERY_VIDEO_MEMORY_INFO* local) noexcept {
+    try {
+        const auto adapter = session_video_memory_adapter(session);
+        return adapter && local != nullptr &&
+            SUCCEEDED(adapter->QueryVideoMemoryInfo(
+                0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, local));
+    } catch (...) {
+        return false;
+    }
+}
+
 void log_video_memory(
     SessionState& session,
     VideoMemoryStage stage,
@@ -2300,41 +2444,8 @@ void log_video_memory(
         if (!xrfg::bridge_flight_logger().enabled()) {
             return;
         }
-        Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
-        {
-            std::scoped_lock lock(session.video_memory_mutex);
-            if (!session.video_memory_adapter && !session.video_memory_unavailable) {
-                LUID luid{};
-                bool found = false;
-                if (session.d3d12_device) {
-                    luid = session.d3d12_device->GetAdapterLuid();
-                    found = true;
-                } else if (session.d3d11_device) {
-                    Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
-                    Microsoft::WRL::ComPtr<IDXGIAdapter> device_adapter;
-                    DXGI_ADAPTER_DESC description{};
-                    if (SUCCEEDED(session.d3d11_device.As(&dxgi_device)) &&
-                        SUCCEEDED(dxgi_device->GetAdapter(&device_adapter)) &&
-                        SUCCEEDED(device_adapter->GetDesc(&description))) {
-                        luid = description.AdapterLuid;
-                        found = true;
-                    }
-                }
-                // No device yet: a later record finds one.
-                if (!found) {
-                    return;
-                }
-                Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-                if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) ||
-                    FAILED(factory->EnumAdapterByLuid(
-                        luid, IID_PPV_ARGS(&session.video_memory_adapter)))) {
-                    session.video_memory_adapter.Reset();
-                    session.video_memory_unavailable = true;
-                    return;
-                }
-            }
-            adapter = session.video_memory_adapter;
-        }
+        const Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter =
+            session_video_memory_adapter(session);
         if (!adapter) {
             return;
         }
@@ -4143,6 +4254,9 @@ create_vulkan_frame_generation_swapchains(
             session->fixed_frame_multiplier.hold();
         }
         session->triple_switchable = false;
+        // Rever VR's fill with the dynamic multiplier: no live multiplier any more, fill as before (no presenter yet).
+        session->fill_dynamic = false;
+        session->fill_shape = false;
         for (const ProjectionResourceMapping& mapping : mappings) {
             const auto swapchain = find_swapchain(mapping.application_swapchain);
             if (!swapchain) {
@@ -4222,6 +4336,139 @@ create_vulkan_frame_generation_swapchains(
         return false;
     } catch (...) {
         return false;
+    }
+}
+
+// --- Rever VR's video memory guard (xrfg/vram_guard.hpp, KB GVX-060): the swapchains' side -------------------------
+
+// "U of B MB": the process's video memory as DXGI answers it (a budget Rever's runtime lowered included), for a line.
+void describe_video_memory(SessionState& session, char* text, std::size_t size) noexcept {
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+    if (query_local_video_memory(session, &local)) {
+        std::snprintf(text, size, "%llu of %llu MB",
+                      static_cast<unsigned long long>(local.CurrentUsage >> 20U),
+                      static_cast<unsigned long long>(local.Budget >> 20U));
+    } else {
+        std::snprintf(text, size, "unknown");
+    }
+}
+
+[[nodiscard]] bool colour_swapchain(const XrSwapchainCreateInfo& info) noexcept {
+    return (info.usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
+        (info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0;
+}
+
+// The session's other swapchains of this size whose eye generation is armed (a panel's not counted).
+[[nodiscard]] std::size_t armed_eye_swapchains_of_size(
+    const std::shared_ptr<SessionState>& session,
+    const SwapchainState* except,
+    std::uint32_t width,
+    std::uint32_t height) {
+    std::size_t armed = 0;
+    for (const auto& swapchain : find_swapchains(session)) {
+        if (swapchain.get() == except || swapchain->create_info.width != width ||
+            swapchain->create_info.height != height) {
+            continue;
+        }
+        std::scoped_lock lock(swapchain->mutex);
+        if (swapchain->frame_generation && !swapchain->frame_generation->panel_flow) {
+            ++armed;
+        }
+    }
+    return armed;
+}
+
+// Every swapchain the game makes, in ofxr_rescue.log; a colour one the size of an eye the layer already generates for
+// is the game replacing its projection's swapchains (MSFS 2024 mid-flight, 08:51:39): stamped for the guard's next poll.
+void note_swapchain_created(
+    const std::shared_ptr<SessionState>& session,
+    const std::shared_ptr<SwapchainState>& created) noexcept {
+    try {
+        const XrSwapchainCreateInfo& info = created->create_info;
+        const bool colour = colour_swapchain(info);
+        const bool depth = (info.usageFlags & XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+        const std::size_t armed =
+            colour ? armed_eye_swapchains_of_size(session, created.get(), info.width, info.height) : 0;
+        if (armed != 0) {
+            session->vram_guard_recreated_ns.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count(),
+                std::memory_order_relaxed);
+        }
+        char memory[64] = {};
+        describe_video_memory(*session, memory, sizeof(memory));
+        char line[360] = {};
+        std::snprintf(line, sizeof(line),
+                      "swapchain made: %016llx, %ux%u, format %lld, %s, array %u, %u sample(s)%s; video memory %s",
+                      static_cast<unsigned long long>(handle_value(created->handle)), info.width, info.height,
+                      static_cast<long long>(info.format), colour ? "colour" : depth ? "depth" : "other",
+                      info.arraySize, info.sampleCount,
+                      armed != 0 ? " - a replacement: the layer still generates for a swapchain of this size" : "",
+                      memory);
+        rever_rescue_note(line);
+    } catch (...) {
+    }
+}
+
+// The projection's swapchains the game replaced and has not destroyed yet: colour ones with eye generation armed,
+// not named by this frame's projection and the size of one that is.
+[[nodiscard]] std::vector<std::shared_ptr<SwapchainState>> replaced_generation_swapchains(
+    const std::shared_ptr<SessionState>& session,
+    std::span<const ProjectionResourceMapping> mappings) {
+    std::vector<std::shared_ptr<SwapchainState>> replaced;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> sizes;
+    for (const ProjectionResourceMapping& mapping : mappings) {
+        if (const auto swapchain = find_swapchain(mapping.application_swapchain)) {
+            sizes.emplace_back(swapchain->create_info.width, swapchain->create_info.height);
+        }
+    }
+    for (const auto& swapchain : find_swapchains(session)) {
+        const bool named = std::any_of(mappings.begin(), mappings.end(),
+            [&](const ProjectionResourceMapping& mapping) {
+                return mapping.application_swapchain == swapchain->handle;
+            });
+        const std::pair<std::uint32_t, std::uint32_t> size{
+            swapchain->create_info.width, swapchain->create_info.height};
+        if (named || !colour_swapchain(swapchain->create_info) ||
+            std::find(sizes.begin(), sizes.end(), size) == sizes.end()) {
+            continue;
+        }
+        std::scoped_lock lock(swapchain->mutex);
+        if (swapchain->frame_generation && !swapchain->frame_generation->panel_flow) {
+            replaced.push_back(swapchain);
+        }
+    }
+    return replaced;
+}
+
+// Before the new projection swapchains' generation images are made: the replaced ones' go (their private swapchains,
+// staging and synthesizer, as the game's xrDestroySwapchain would take them), so the two sets never live at once. Their
+// history stays with them until the game destroys them, and they arm again from it if a projection names them again.
+// The caller holds the frame call mutex and has the presenter idle with its content lock (a queued submission or the
+// retained repeat names those private swapchains), as for release_session_generation_budget.
+void release_replaced_generation(
+    const std::shared_ptr<SessionState>& session,
+    const std::vector<std::shared_ptr<SwapchainState>>& replaced) noexcept {
+    try {
+        {
+            std::scoped_lock lock(session->presenter_mutex);
+            session->presenter_last_frame.reset();
+        }
+        for (const auto& swapchain : replaced) {
+            std::scoped_lock call_lock(swapchain->call_mutex);
+            drain_swapchain_gpu(swapchain);
+            destroy_frame_generation_swapchains(swapchain);
+            {
+                std::scoped_lock lock(swapchain->mutex);
+                // the next capture is a new ring's first (as fall_back_to_shallow_pipeline)
+                swapchain->last_released_capture.reset();
+                swapchain->last_released_motion_vectors.reset();
+            }
+            swapchain->generation_declined = false;
+            swapchain->generation_eligible_pending = swapchain->enumerated_image_count != 0;
+        }
+    } catch (...) {
     }
 }
 
@@ -5065,10 +5312,10 @@ XrResult layer_create_api_layer_instance_impl(
             dispatch->rever_streamer_runtime =
                 std::string_view(dispatch->runtime_name).find(
                     "Rever Streamer") != std::string_view::npos;
-            char presenter[8]{};
+            // OFXR_REVER_PRESENTER=1, or [ofxr] rever_presenter=1 for a game Steam starts again without Rever's
+            // environment (Rever VR, KB GVX-058)
             dispatch->rever_presenter = dispatch->rever_streamer_runtime &&
-                GetEnvironmentVariableA("OFXR_REVER_PRESENTER", presenter, sizeof presenter) > 0 &&
-                presenter[0] == '1';
+                xrfg::implicit_layer::read_rever_presenter(current_layer_directory());
             dispatch->inline_unless_pipelined =
                 dispatch->virtual_desktop_runtime ||
                 std::string_view(dispatch->runtime_name).find(
@@ -5265,6 +5512,79 @@ XrResult layer_create_session_impl(
     const bool triple_requested = multiplier_requested > 2;
     state->dynamic_frame_gen =
         xrfg::implicit_layer::read_dynamic_frame_gen(current_layer_directory());
+    state->rescue_enabled =
+        xrfg::implicit_layer::read_rescue_frame_gen(current_layer_directory());
+    if (state->rescue_enabled) {
+        // the thresholds, in percent of the display's period, from the game's environment when set (for tuning in the
+        // headset without a build): OFXR_REVER_RESCUE_TRY (85) and OFXR_REVER_RESCUE_FAIL (108)
+        const auto percent = [](const wchar_t* name, double fallback, double low, double high) noexcept {
+            wchar_t value[16] = {};
+            const DWORD length = GetEnvironmentVariableW(name, value, 16);
+            if (length == 0 || length >= 16) {
+                return fallback;
+            }
+            const double parsed = std::wcstod(value, nullptr) / 100.0;
+            return parsed >= low && parsed <= high ? parsed : fallback;
+        };
+        state->rescue.try_fraction = percent(L"OFXR_REVER_RESCUE_TRY", state->rescue.try_fraction, 0.40, 1.00);
+        state->rescue.fail_fraction = percent(L"OFXR_REVER_RESCUE_FAIL", state->rescue.fail_fraction, 1.00, 1.60);
+        char line[200] = {};
+        std::snprintf(line, sizeof(line),
+                      "rescue on: frames pass through while the game's own frame stays under %.0f %% of the display's "
+                      "period, pair again once its pace goes over %.0f %%",
+                      state->rescue.try_fraction * 100.0, state->rescue.fail_fraction * 100.0);
+        rever_rescue_note(line);
+    }
+    state->true_time_enabled =
+        xrfg::implicit_layer::read_true_time(current_layer_directory());
+    state->fill_enabled =
+        xrfg::implicit_layer::read_fill_frame_gen(current_layer_directory());
+    if (state->true_time_enabled || state->fill_enabled) {
+        // 882: Rever VR's true display time and fill. a bit 0 true time on, bit 1 fill on, bit 2 (later, once) fill
+        // found the session inline and left it as it is.
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_transition,
+            882,
+            (state->true_time_enabled ? 1u : 0u) | (state->fill_enabled ? 2u : 0u),
+            0,
+            0);
+        if (state->true_time_enabled) {
+            rever_rescue_note("true time on: on the presenter the game is handed the display time its real frame is "
+                              "measured to go out at");
+        }
+        if (state->fill_enabled) {
+            rever_rescue_note("fill on: on the presenter the game runs at up to the display rate, and a frame pairs "
+                              "only when it came a slot or more late");
+        }
+    }
+    // Rever VR's fill with the dynamic multiplier (xrfg/fill_frame_gen.hpp fill_in_force, 2026-11-20): only with fill
+    // and the dynamic multiplier, whose steps and wait stamps it rides on.
+    if (state->fill_enabled && xrfg::implicit_layer::read_fill_dynamic(current_layer_directory())) {
+        state->fill_dynamic = state->dynamic_frame_gen;
+        rever_rescue_note(state->fill_dynamic
+            ? "fill dynamic on: on the presenter the multiplier keeps choosing 2X-4X by the game's own frame and the "
+              "GPU; fill in force only at 2X while the game keeps up with the display by itself (its own frame under "
+              "85 % of the period for 2 s, its pace back over 108 % leaves), elsewhere frames pair as without fill"
+            : "fill dynamic asked for without the dynamic multiplier (OFXR_DYNAMIC_FRAME_GEN): fill as before");
+    }
+    // Rever VR's video memory guard (xrfg/vram_guard.hpp, KB GVX-060, 2026-11-24): off unless set, and then every
+    // decision and every swapchain the game makes or destroys in ofxr_rescue.log.
+    state->vram_guard_enabled =
+        xrfg::implicit_layer::read_rever_vram_guard(current_layer_directory());
+    if (state->vram_guard_enabled) {
+        state->vram_guard.configure(
+            xrfg::implicit_layer::read_rever_vram_margin_mb(current_layer_directory()),
+            xrfg::implicit_layer::read_rever_vram_budget_extra_mb(current_layer_directory()));
+        char line[360] = {};
+        std::snprintf(line, sizeof(line),
+                      "vram guard on: the process's video memory read twice a second; near the budget (%llu MB under "
+                      "it, the runtime's reserve of %llu MB added back) the multiplier one lower, over it 2X, at a "
+                      "recreation of the projection's swapchains one lower for 5 s and the replaced ones' generation "
+                      "released before the new one is made",
+                      static_cast<unsigned long long>(state->vram_guard.margin_bytes() >> 20U),
+                      static_cast<unsigned long long>(state->vram_guard.extra_bytes() >> 20U));
+        rever_rescue_note(line);
+    }
     state->single_swapchain_rings =
         xrfg::implicit_layer::read_single_swapchain_rings(current_layer_directory());
     state->capture_at_end_frame =
@@ -5563,6 +5883,12 @@ XrResult layer_create_session_impl(
     if (triple_binding && !state->triple_switchable) {
         state->fixed_frame_multiplier.hold();
     }
+    // Rever VR's fill with the dynamic multiplier moves the multiplier and fill's shape live: a session whose multiplier
+    // cannot move keeps fill as before.
+    if (state->fill_dynamic && !state->triple_switchable) {
+        state->fill_dynamic = false;
+        rever_rescue_note("fill dynamic: this session's multiplier cannot move live - fill as before");
+    }
     // 700: the session's shape. a frames per application frame, b the deeper
     // pipeline, c whether 3X was asked for - or 2 when the record marks a
     // live change rather than the session's creation.
@@ -5643,6 +5969,11 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_binding_queue(current_layer_directory());
     state->presenter_from_start =
         xrfg::implicit_layer::read_presenter_from_start(current_layer_directory());
+    // Rever VR (KB GVX-061, 2026-11-24): the binding queue at high priority when asked
+    // (read_rever_binding_queue_high), as VectorXR makes the queue it gives the runtime. Without
+    // the key: NORMAL and no line, exactly as before.
+    const bool binding_queue_high =
+        xrfg::implicit_layer::read_rever_binding_queue_high(current_layer_directory());
     if (binding_queue_requested &&
         state->graphics_binding == SessionGraphicsBinding::d3d12 &&
         create_info != nullptr && state->d3d12_device && state->d3d12_queue) {
@@ -5654,12 +5985,23 @@ XrResult layer_create_session_impl(
             binding_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
             binding_queue_description.NodeMask =
                 state->d3d12_queue->GetDesc().NodeMask;
+            if (binding_queue_high) {
+                binding_queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+            }
             Microsoft::WRL::ComPtr<ID3D12CommandQueue> binding_queue;
             Microsoft::WRL::ComPtr<ID3D12Fence> release_fence;
             Microsoft::WRL::ComPtr<ID3D12Fence> reacquire_fence;
-            if (SUCCEEDED(state->d3d12_device->CreateCommandQueue(
+            HRESULT binding_queue_result = state->d3d12_device->CreateCommandQueue(
+                &binding_queue_description,
+                IID_PPV_ARGS(binding_queue.GetAddressOf()));
+            if (FAILED(binding_queue_result) && binding_queue_high) {
+                // Fail open: a queue at NORMAL, as without the key.
+                binding_queue_description.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+                binding_queue_result = state->d3d12_device->CreateCommandQueue(
                     &binding_queue_description,
-                    IID_PPV_ARGS(binding_queue.GetAddressOf()))) &&
+                    IID_PPV_ARGS(binding_queue.ReleaseAndGetAddressOf()));
+            }
+            if (SUCCEEDED(binding_queue_result) &&
                 SUCCEEDED(state->d3d12_device->CreateFence(
                     0, D3D12_FENCE_FLAG_NONE,
                     IID_PPV_ARGS(release_fence.GetAddressOf()))) &&
@@ -5678,6 +6020,27 @@ XrResult layer_create_session_impl(
                 state->graphics_binding_capabilities |= 16ULL;
             }
         }
+    }
+    if (binding_queue_high) {
+        // The next run's proof, in ofxr_rescue.log (KB GVX-061).
+        char line[360] = {};
+        if (state->binding_queue) {
+            std::snprintf(line, sizeof(line),
+                          "binding queue: the runtime gets OFXR's own D3D12 queue at %s priority - generated "
+                          "frames are copied into the runtime's images and released there, not behind the "
+                          "game's queued work (KB GVX-061)",
+                          state->binding_queue->GetDesc().Priority == D3D12_COMMAND_QUEUE_PRIORITY_HIGH
+                              ? "HIGH"
+                              : "NORMAL (HIGH refused)");
+        } else {
+            std::snprintf(line, sizeof(line),
+                          "binding queue at high priority asked, but this session has no binding queue (%s) - "
+                          "the runtime syncs with the game's queue as before (KB GVX-061)",
+                          !binding_queue_requested ? "[ofxr] binding_queue is not set"
+                          : state->graphics_binding != SessionGraphicsBinding::d3d12 ? "not a D3D12 session"
+                                                                                    : "it could not be made");
+        }
+        rever_rescue_note(line);
     }
 
     XrSession created_session = XR_NULL_HANDLE;
@@ -5883,6 +6246,8 @@ void reset_frame_bookkeeping(const std::shared_ptr<SessionState>& state) {
         std::scoped_lock presenter_lock(state->presenter_mutex);
         state->presenter_adopted_frame_state_valid = false;
         state->last_virtual_display_time = 0;
+        state->true_time.reset();
+        state->true_time_lead = 0;
     }
     {
         std::scoped_lock lock(state->mutex);
@@ -6088,7 +6453,12 @@ XrResult layer_wait_frame_impl(
             : state->presenter_frame_state.predictedDisplayPeriod;
         state->application_timeline_period.store(
             runtime_period, std::memory_order_relaxed);
-        const XrDuration virtual_period = (state->manual_control.stop_requested() || !state->menu_enabled)
+        const bool presenter_generating =
+            !(state->manual_control.stop_requested() || !state->menu_enabled);
+        // Rever VR's fill (xrfg/fill_frame_gen.hpp): the display's own period,
+        // so the application may run at up to the display rate. (fill_dynamic:
+        // outside fill's shape the multiplier's, as without fill.)
+        const XrDuration virtual_period = (!presenter_generating || fill_in_force(*state))
             ? runtime_period
             : virtual_display_period(
                 runtime_period,
@@ -6096,9 +6466,27 @@ XrResult layer_wait_frame_impl(
         // The application's timeline is anchored to the runtime's own
         // prediction, one virtual period ahead of the frame the presenter is
         // about to submit.
+        //
+        // Rever VR's true display time (xrfg/true_display_time.hpp): ahead by
+        // the delay measured from this prediction to the slot the
+        // application's real frame actually goes out in, once measured,
+        // reached an eighth of a period a frame.
+        XrDuration anchor_lead = virtual_period;
+        if (presenter_generating && state->true_time_enabled) {
+            const auto measured = state->true_time.lead(
+                state->presenter_frame_state.predictedDisplayTime,
+                virtual_period,
+                runtime_period);
+            anchor_lead = xrfg::TrueDisplayTime::slew_lead(
+                state->true_time_lead,
+                measured ? *measured : virtual_period,
+                virtual_period,
+                runtime_period);
+            state->true_time_lead = anchor_lead;
+        }
         const XrTime anchor = add_display_duration(
             state->presenter_frame_state.predictedDisplayTime,
-            virtual_period);
+            anchor_lead);
         // A second wait inside one presenter frame has to come back later than
         // the first, so the guard below steps off the last time served. That
         // step invents time the runtime never advanced, and the ceiling is
@@ -6154,6 +6542,13 @@ XrResult layer_wait_frame_impl(
             virtual_time = state->last_virtual_display_time + 1;
         }
         state->last_virtual_display_time = virtual_time;
+        // What was handed out against which prediction, for the presenter to
+        // measure at the real frame's pop (xrfg/true_display_time.hpp).
+        if (state->true_time_enabled || state->fill_enabled) {
+            state->true_time.note_handed(
+                virtual_time,
+                state->presenter_frame_state.predictedDisplayTime);
+        }
         frame_state->predictedDisplayTime = virtual_time;
         frame_state->predictedDisplayPeriod = virtual_period;
         frame_state->shouldRender = state->presenter_frame_state.shouldRender;
@@ -6647,6 +7042,11 @@ XrResult layer_create_swapchain_impl(
         swapchain_state->vulkan_bridge = std::move(bridge);
     }
     *swapchain = created_swapchain;
+    // Rever VR's video memory guard (KB GVX-060): every swapchain the game
+    // makes in ofxr_rescue.log, and a replacement of the projection's stamped.
+    if (state->vram_guard_enabled) {
+        note_swapchain_created(state, swapchain_state);
+    }
     // A swapchain created mid-session does not hold generation off. Nothing
     // in flight names it - no pair, no history, no retained repeat - and
     // generation resources are taken when a projection layer first names a
@@ -6715,6 +7115,18 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
             0);
     }
     std::scoped_lock call_lock(state->call_mutex);
+    // Rever VR's video memory guard (KB GVX-060): what this destruction
+    // releases, for the line below.
+    const bool vram_note = state->session->vram_guard_enabled;
+    bool had_generation = false;
+    char memory_before[64] = {};
+    if (vram_note) {
+        {
+            std::scoped_lock lock(state->mutex);
+            had_generation = static_cast<bool>(state->frame_generation);
+        }
+        describe_video_memory(*state->session, memory_before, sizeof(memory_before));
+    }
     // A bridged release still waiting for xrEndFrame is dropped: the image
     // can no longer be shown, and the runtime's images go with the swapchain.
     state->pending_bridge_release.reset();
@@ -6734,6 +7146,20 @@ XrResult layer_destroy_swapchain_impl(XrSwapchain swapchain) {
     }
     log_video_memory(*state->session, VideoMemoryStage::swapchain_destroyed,
         handle_value(swapchain));
+    if (vram_note) {
+        char memory_after[64] = {};
+        describe_video_memory(*state->session, memory_after, sizeof(memory_after));
+        char line[360] = {};
+        std::snprintf(line, sizeof(line),
+                      "swapchain destroyed: %016llx, %ux%u, %s (%d); %s; video memory %s before, %s after (its "
+                      "history goes once nothing holds it)",
+                      static_cast<unsigned long long>(handle_value(swapchain)), state->create_info.width,
+                      state->create_info.height, colour_swapchain(state->create_info) ? "colour" : "not colour",
+                      static_cast<int>(result),
+                      had_generation ? "its generation images released with it" : "no generation images of its own",
+                      memory_before, memory_after);
+        rever_rescue_note(line);
+    }
     return result;
 }
 
@@ -9113,6 +9539,78 @@ void log_release_phase(const ReleasePhaseReport& report) noexcept {
             (static_cast<std::uint64_t>(report.saturated_windows) << 16));
 }
 
+// Rever VR's true display time (xrfg/true_display_time.hpp), once a window of
+// real frames popped; for the caller to record once it has let go of
+// presenter_mutex.
+struct TrueTimeReport {
+    bool due{};
+    std::uint64_t measured_us{};
+    std::uint64_t lead_us{};
+    std::uint32_t matched{};
+    std::uint32_t unmatched{};
+    std::uint64_t last_us{};
+};
+
+// A real frame popped: the delay from the presenter's prediction at the wait
+// that handed out its time to the slot it goes out in. presenter_mutex held.
+void observe_true_time(
+    SessionState& state,
+    XrTime submitted_display_time,
+    XrTime presented_display_time,
+    TrueTimeReport* report) noexcept {
+    if (state.true_time.note_presented(
+            submitted_display_time, presented_display_time)) {
+        ++state.true_time_window_matched;
+    } else {
+        ++state.true_time_window_unmatched;
+    }
+    constexpr std::uint32_t kWindowFrames = 60;
+    if (state.true_time_window_matched + state.true_time_window_unmatched <
+        kWindowFrames) {
+        return;
+    }
+    if (report != nullptr) {
+        const auto measured = state.true_time.measured();
+        report->due = true;
+        report->measured_us = measured && *measured > 0
+            ? static_cast<std::uint64_t>(*measured / 1000)
+            : 0;
+        report->lead_us = state.true_time_enabled && state.true_time_lead > 0
+            ? static_cast<std::uint64_t>(state.true_time_lead / 1000)
+            : 0;
+        report->matched = state.true_time_window_matched;
+        report->unmatched = state.true_time_window_unmatched;
+        report->last_us = state.true_time.last_delay > 0
+            ? static_cast<std::uint64_t>(state.true_time.last_delay / 1000)
+            : 0;
+    }
+    state.true_time_window_matched = 0;
+    state.true_time_window_unmatched = 0;
+}
+
+// 880: Rever VR's true display time, every 60 real frames popped (true_time
+// or fill on). a the delay measured - the mean of the middle half of the last
+// 16, from the presenter's prediction at the application's wait to the slot
+// its real frame went out in - in microseconds, 0 under 8 samples; b what the
+// wait adds to the prediction now, in microseconds (true_time only; the
+// measurement held to [virtual period, virtual period + 6 periods], one
+// virtual period while unmeasured or stale), 0 with true_time off; c the
+// window's real frames whose submitted time matched a handed one, those that
+// did not << 16, and the last delay in microseconds << 32.
+void log_true_time(const TrueTimeReport& report) noexcept {
+    if (!report.due) {
+        return;
+    }
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        880,
+        report.measured_us,
+        report.lead_us,
+        static_cast<std::uint64_t>(report.matched & 0xFFFFU) |
+            (static_cast<std::uint64_t>(report.unmatched & 0xFFFFU) << 16) |
+            (std::min<std::uint64_t>(report.last_us, 0xFFFFFFFFULL) << 32));
+}
+
 void pace_presenter_submission(
     const std::shared_ptr<SessionState>& state) noexcept {
     try {
@@ -9827,6 +10325,8 @@ void continuous_presenter_main(
             std::int64_t held_reason = 0;
             // Release phase, recorded after the lock.
             ReleasePhaseReport phase_report{};
+            // Rever VR's true display time, recorded after the lock (880).
+            TrueTimeReport true_time_report{};
             // Whether the once-per-frame hold waits for this pop.
             bool hold_waits_for_pop = false;
             {
@@ -9908,8 +10408,12 @@ void continuous_presenter_main(
                             std::chrono::nanoseconds>(age).count();
                         held_sequence = front->sequence;
                         held_reason = too_young ? 400 : 401;
-                        // Rever VR's GPU-aware dynamic multiplier (KB ALI-079)
-                        state->gpu_late_synthetics.fetch_add(1, std::memory_order_relaxed);
+                        // Rever VR's GPU-aware dynamic multiplier (KB ALI-079). (fill_dynamic's 2X: a hold
+                        // for age is the deeper pipeline re-phasing after frames that went alone, not late.)
+                        if (xrfg::held_synthetic_counts_late(
+                                state->fill_dynamic && fill_in_force(*state), too_young)) {
+                            state->gpu_late_synthetics.fetch_add(1, std::memory_order_relaxed);
+                        }
                         repeated_frame = state->presenter_last_frame;
                         // A first synthetic kept back for its output is as
                         // late as one handed over unwritten: the slot shows a
@@ -9932,6 +10436,17 @@ void continuous_presenter_main(
                         // What the once-per-frame hold waits on; see
                         // wait_for_presenter_pair.
                         state->presenter_popped_sequence = request->sequence;
+                        // Rever VR's true display time: where the real frame
+                        // goes out against what its wait was handed.
+                        if ((state->true_time_enabled || state->fill_enabled) &&
+                            request->owned_frame &&
+                            !request->owned_frame->synthetic) {
+                            observe_true_time(
+                                *state,
+                                request->owned_frame->info.displayTime,
+                                frame_state.predictedDisplayTime,
+                                &true_time_report);
+                        }
                         if (request->owned_frame) {
                             if (request->owned_frame->leads_frame) {
                                 judge_leader_readiness(
@@ -9979,6 +10494,7 @@ void continuous_presenter_main(
             // its age in microseconds, b the display period in
             // microseconds, c its sequence.
             log_release_phase(phase_report);
+            log_true_time(true_time_report);
             if (held_age_ns >= 0) {
                 xrfg::bridge_flight_logger().event(
                     xrfg::BridgeFlightOperation::presenter_transition,
@@ -11179,6 +11695,11 @@ void continuous_presenter_main(
         state->release_floor_armed = false;
         state->presenter_popped_sequence = 0;
         state->last_enqueued_frame_sequence = 0;
+        // Rever VR's true display time: measured on this presenter's slots.
+        state->true_time.reset();
+        state->true_time_lead = 0;
+        state->true_time_window_matched = 0;
+        state->true_time_window_unmatched = 0;
         // A schedule left over from a previous presenter would stall the first
         // submission of this one.
         // A display time from a previous presenter says nothing about this
@@ -11333,6 +11854,13 @@ void stop_continuous_presenter(
 // GPU is the limit, the pop only moves the application's thread ahead of
 // it, and the count left synthesis a period the pop takes away (issue #36).
 [[nodiscard]] bool presenter_holds_by_count(const SessionState& state) noexcept {
+    // Rever VR's fill (xrfg/fill_frame_gen.hpp): released once a presenter
+    // frame, whatever the frame made; a pop of its own submissions would hold
+    // it for the slots it fills. (fill_dynamic: only while fill is in force,
+    // in its shape at 2X; elsewhere the hold below, as without fill.)
+    if (fill_in_force(state)) {
+        return true;
+    }
     if (state.dispatch && state.dispatch->steamvr_runtime) {
         return true;
     }
@@ -11398,13 +11926,19 @@ void wait_for_presenter_pair(
         // come, and a target the presenter cannot reach before that enqueue
         // would never be met, since the enqueue waits on this. The count
         // needs no prediction.
-        const bool by_count = !enqueued || presenter_holds_by_count(*state);
+        // Rever VR's fill (xrfg/fill_frame_gen.hpp): one presenter frame past
+        // the last release, whatever this frame made. Held for the slots its
+        // own synthetics fill, the next frame's gap would be two and it would
+        // pair again: a single late frame would lock the game at half rate.
+        const bool fill = fill_in_force(*state);
+        const bool by_count = fill || !enqueued || presenter_holds_by_count(*state);
         const std::uint64_t frames = state->frames_per_application_frame.load();
         std::uint64_t target = 0;
         if (by_count) {
             // A frame's worth of presenter frames past the count the
             // application was last released at.
-            target = state->application_served_serial + (pairable ? frames : 1U);
+            target = state->application_served_serial +
+                (pairable && !fill ? frames : 1U);
         } else {
             // The frame's real submission is the one enqueued last. A prime
             // is released at its own pop, whatever the depth: held for that
@@ -11423,14 +11957,17 @@ void wait_for_presenter_pair(
         // back, each release is held to the 3X cadence, so one failed pair
         // cannot speed the game up and feed the next failure. Not where the
         // target above is a pop: there the floor pinned the phase (issue
-        // #43). See release_serial_floor for both.
-        const bool floor_armed = state->release_floor_armed;
-        const std::uint64_t serial_floor = xrfg::release_serial_floor(
-            frames,
-            by_count,
-            pairable,
-            floor_armed,
-            state->application_served_serial);
+        // #43). See release_serial_floor for both. Never under fill, where a
+        // frame without synthetics is the game keeping up, not a failure.
+        const bool floor_armed = !fill && state->release_floor_armed;
+        const std::uint64_t serial_floor = fill
+            ? 0
+            : xrfg::release_serial_floor(
+                  frames,
+                  by_count,
+                  pairable,
+                  floor_armed,
+                  state->application_served_serial);
         const std::uint64_t served_at_entry = state->application_served_serial;
         // Set when the target above was reached before the floor was: the
         // floor, not the hold's own phase, is what held this release.
@@ -11477,15 +12014,17 @@ void wait_for_presenter_pair(
         // means an application that arrives late catches up in one step, and
         // the surplus is what that step discards.
         state->application_served_serial = state->presenter_frame_serial;
-        state->release_floor_armed = xrfg::release_floor_armed_after(
-            frames, by_count, pairable, floor_armed, floor_held_back);
+        state->release_floor_armed = !fill &&
+            xrfg::release_floor_armed_after(
+                frames, by_count, pairable, floor_armed, floor_held_back);
         const std::uint64_t frames_since_release =
             state->presenter_frame_serial - served_at_entry;
         const bool floor_still_armed = state->release_floor_armed;
         // 3X on SteamVR only: see triple_release_delay. Elsewhere the phase
-        // above is what moves the release, and the delay stays at zero.
+        // above is what moves the release, and the delay stays at zero. Not
+        // under fill, which releases once a presenter frame.
         const std::chrono::nanoseconds release_offset =
-            pairable && frames > 2
+            pairable && frames > 2 && !fill
                 ? state->triple_release_delay
                 : std::chrono::nanoseconds::zero();
         // Never record under presenter_mutex: the presenter thread takes it
@@ -14732,6 +15271,226 @@ void poll_turn_brake(SessionState& state) noexcept {
     }
 }
 
+// Rever VR's rescue (read_rescue_frame_gen, xrfg/rescue_frame_gen.hpp, 2026-11-16): whether this real frame passes
+// through - primed, its history kept, nothing invented, in the game's own slot - because the game keeps up with the
+// display by itself. Inline sessions only (the presenter would need its virtual period changed: not done, logged once).
+// The xrEndFrame thread; it takes in the game's latest xrWaitFrame return (stamped by the wait thread). Logged to
+// %LOCALAPPDATA%\ReverVR\ofxr_rescue.log at each change.
+bool update_rescue(
+    SessionState& state,
+    bool use_continuous_presenter,
+    const std::optional<XrDuration>& display_period) noexcept {
+    if (!state.rescue_enabled) {
+        return false;
+    }
+    if (use_continuous_presenter) {
+        if (!state.rescue_presenter_noted) {
+            state.rescue_presenter_noted = true;
+            rever_rescue_note("rescue: this session runs on the presenter - the rescue is for inline sessions, frames pair as before");
+        }
+        return false;
+    }
+    const std::int64_t wait_ns = state.dynamic_wait_returned_ns.load(std::memory_order_relaxed);
+    if (wait_ns > 0 && wait_ns != state.rescue_seen_wait_ns) {
+        state.rescue_seen_wait_ns = wait_ns;
+        state.rescue.on_wait(wait_ns);
+    }
+    const std::int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    bool changed = false;
+    const bool passing = state.rescue.on_end_frame(now_ns, display_period ? static_cast<std::int64_t>(*display_period) : 0,
+                                                   changed);
+    if (changed) {
+        char line[256] = {};
+        std::snprintf(line, sizeof(line),
+                      "rescue: %s - the game's own frame %.2f ms, its pace %.2f ms, the display's %.2f ms (change %u, next "
+                      "try after %.0f s if this fails)",
+                      passing ? "frames pass through (1X, the game at the display's pace)" : "frames pair again (2X)",
+                      state.rescue.frame_ns / 1e6, state.rescue.interval_ns / 1e6,
+                      display_period ? static_cast<double>(*display_period) / 1e6 : 0.0, state.rescue.changes,
+                      static_cast<double>(state.rescue.backoff_ns) / 1e9);
+        rever_rescue_note(line);
+    }
+    ++state.rescue_frames;
+    if (passing) {
+        ++state.rescue_passed;
+    }
+    if (state.rescue_status_at_ns == 0) {
+        state.rescue_status_at_ns = now_ns + 5'000'000'000;
+    } else if (now_ns >= state.rescue_status_at_ns) {
+        state.rescue_status_at_ns = now_ns + 5'000'000'000;
+        char line[256] = {};
+        std::snprintf(line, sizeof(line),
+                      "rescue status: %s; %llu of %llu frames passed through; the game's own frame %.2f ms, its pace %.2f "
+                      "ms, the display's %.2f ms",
+                      passing ? "passing through (1X)" : "pairing (2X)",
+                      static_cast<unsigned long long>(state.rescue_passed),
+                      static_cast<unsigned long long>(state.rescue_frames), state.rescue.frame_ns / 1e6,
+                      state.rescue.interval_ns / 1e6,
+                      display_period ? static_cast<double>(*display_period) / 1e6 : 0.0);
+        rever_rescue_note(line);
+        state.rescue_frames = 0;
+        state.rescue_passed = 0;
+    }
+    return passing;
+}
+
+// Rever VR's fill (read_fill_frame_gen, xrfg/fill_frame_gen.hpp, 2026-11-16): the submissions this real frame takes on
+// the presenter - 1, primed and alone in its own slot, when it followed the previous real frame by a display period or
+// less; 2 up to the multiplier, paired with the synthetics shown before it, when it came later - from the presenter's
+// predictions at the two frames' waits (the display times handed out where those are gone). `pairable` is whether the frame could
+// pair at all (a previous frame, compatible, not braked); one that cannot primes and counts as a prime. 0 where fill does
+// not apply: off, or an inline session, which is left as it is (noted once). The xrEndFrame thread.
+std::uint32_t update_fill(
+    SessionState& state,
+    bool use_continuous_presenter,
+    const std::optional<ProjectionSnapshot>& previous,
+    const ProjectionSnapshot& current,
+    bool pairable) noexcept {
+    if (!state.fill_enabled) {
+        return 0;
+    }
+    if (!use_continuous_presenter) {
+        if (!state.fill_inline_noted) {
+            state.fill_inline_noted = true;
+            rever_rescue_note("fill: this session's frames run inline - fill applies on the presenter only, inline "
+                              "frames pair as before");
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::presenter_transition,
+                882,
+                (state.true_time_enabled ? 1u : 0u) | 2u | 4u,
+                0,
+                0);
+        }
+        return 0;
+    }
+    // Rever VR's fill with the dynamic multiplier (xrfg/fill_frame_gen.hpp fill_in_force): outside fill's shape the
+    // frame pairs as without fill, counted for the note.
+    if (!fill_in_force(state)) {
+        ++state.fill_outside;
+        return 0;
+    }
+    if (!pairable || !previous) {
+        state.fill_tally.count(1, 0);
+        return 1;
+    }
+    const XrDuration period =
+        state.application_timeline_period.load(std::memory_order_relaxed);
+    // The slots between the two frames' waits, on the presenter's grid: the
+    // presenter's predictions when their times were handed out. The times
+    // themselves move with the true display time's lead, and a lead that
+    // grows by a period would read as a slot missed - a synthetic for it, a
+    // slot more in the queue, a longer delay measured, a longer lead. The
+    // times handed out where the ring no longer has them.
+    std::int64_t interval =
+        static_cast<std::int64_t>(current.display_time - previous->display_time);
+    {
+        std::scoped_lock lock(state.presenter_mutex);
+        const auto current_at = state.true_time.presenter_time_for(current.display_time);
+        const auto previous_at = state.true_time.presenter_time_for(previous->display_time);
+        if (current_at && previous_at) {
+            interval = *current_at - *previous_at;
+        }
+    }
+    // Rever VR's fill with the dynamic multiplier: never more than the earlier frame's own time - the rest of the
+    // interval is the presenter holding that frame in its xrEndFrame, not a slot the game missed.
+    interval = xrfg::fill_interval(interval, state.fill_own_previous_ns, state.fill_dynamic);
+    const std::uint32_t submissions = xrfg::fill_submissions(
+        interval, static_cast<std::int64_t>(period), state.frames_per_application_frame.load());
+    state.fill_tally.count(submissions, xrfg::fill_gap(interval, static_cast<std::int64_t>(period)));
+    return submissions;
+}
+
+// Rever VR's true display time and fill, for the headset: 881 once a second where fill runs on the presenter - a the
+// frames that went alone (primed) in the second, b the frames that paired, c the synthetics made | the pairs whose gap
+// was over the multiplier << 16 (slots the presenter repeated a frame in instead) | the multiplier << 32 - and a line in
+// %LOCALAPPDATA%\ReverVR\ofxr_rescue.log every five seconds with the same counts and the measured delay (OFXR's flight
+// log stays off in Rever's sessions). The xrEndFrame thread.
+void note_rever_timing(SessionState& state, bool use_continuous_presenter) noexcept {
+    try {
+        if (!state.true_time_enabled && !state.fill_enabled) {
+            return;
+        }
+        const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+        if (state.fill_tally_at_ns == 0) {
+            state.fill_tally_at_ns = now_ns + 1'000'000'000;
+        } else if (now_ns >= state.fill_tally_at_ns) {
+            state.fill_tally_at_ns = now_ns + 1'000'000'000;
+            const xrfg::FillTally tally = state.fill_tally;
+            if (state.fill_enabled && use_continuous_presenter) {
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    881,
+                    tally.primes,
+                    tally.pairs,
+                    static_cast<std::uint64_t>(tally.synthetics & 0xFFFFU) |
+                        (static_cast<std::uint64_t>(tally.over_ceiling & 0xFFFFU) << 16) |
+                        (static_cast<std::uint64_t>(state.frames_per_application_frame.load()) << 32));
+            }
+            state.fill_tally_notes.primes += tally.primes;
+            state.fill_tally_notes.pairs += tally.pairs;
+            state.fill_tally_notes.synthetics += tally.synthetics;
+            state.fill_tally_notes.over_ceiling += tally.over_ceiling;
+            state.fill_tally = {};
+            state.fill_outside_notes += state.fill_outside;
+            state.fill_outside = 0;
+        }
+        if (state.rever_timing_note_at_ns == 0) {
+            state.rever_timing_note_at_ns = now_ns + 5'000'000'000;
+            return;
+        }
+        if (now_ns < state.rever_timing_note_at_ns) {
+            return;
+        }
+        state.rever_timing_note_at_ns = now_ns + 5'000'000'000;
+        std::optional<std::int64_t> measured;
+        XrDuration lead = 0;
+        std::uint64_t matched = 0;
+        std::uint64_t unmatched = 0;
+        {
+            std::scoped_lock lock(state.presenter_mutex);
+            measured = state.true_time.measured();
+            lead = state.true_time_lead;
+            matched = state.true_time.matched;
+            unmatched = state.true_time.unmatched;
+        }
+        const xrfg::FillTally notes = state.fill_tally_notes;
+        state.fill_tally_notes = {};
+        const std::uint32_t outside = state.fill_outside_notes;
+        state.fill_outside_notes = 0;
+        char line[600] = {};
+        int written = std::snprintf(line, sizeof(line),
+                      "timing (%s): fill %s - %u alone, %u paired, %u synthetics (%u pairs over the multiplier %u) in "
+                      "5 s; true time %s - delay measured %.2f ms, handed +%.2f ms; %llu / %llu real frames matched",
+                      use_continuous_presenter ? "presenter" : "inline",
+                      state.fill_enabled ? (use_continuous_presenter ? "on" : "on, not applied inline") : "off",
+                      notes.primes, notes.pairs, notes.synthetics, notes.over_ceiling,
+                      state.frames_per_application_frame.load(),
+                      state.true_time_enabled ? "on" : "off (measured only)",
+                      measured ? static_cast<double>(*measured) / 1e6 : 0.0,
+                      static_cast<double>(lead) / 1e6,
+                      static_cast<unsigned long long>(matched),
+                      static_cast<unsigned long long>(matched + unmatched));
+        // Rever VR's fill with the dynamic multiplier: what the multiplier chose and on what (the game's own frame,
+        // from its wait returning to its xrEndFrame), and the frames that paired as without fill (outside its shape).
+        if (state.fill_dynamic && written > 0 && static_cast<std::size_t>(written) < sizeof(line)) {
+            const double period = static_cast<double>(state.minimum_runtime_display_period);
+            std::snprintf(line + written, sizeof(line) - static_cast<std::size_t>(written),
+                          "; fill dynamic - multiplier %uX, fill %s, the game's own frame %.2f ms = %.2f periods, %u "
+                          "frames paired as without fill",
+                          state.frames_per_application_frame.load(),
+                          fill_in_force(state) ? "in force" : "not in force",
+                          state.dynamic_frame_ns / 1e6,
+                          period > 0.0 ? state.dynamic_frame_ns / period : 0.0,
+                          outside);
+        }
+        rever_rescue_note(line);
+    } catch (...) {
+    }
+}
+
 // Whether the brake holds this real frame: the head's speed between the previous real frame's view
 // and this one's (the first projection layer's first view, in one space), the hysteresis of
 // xrfg::TurnBrake. Held, the frame is primed instead of paired: its history kept, nothing invented,
@@ -14787,10 +15546,49 @@ void apply_live_frame_multiplier(
             return;
         }
         const auto now = std::chrono::steady_clock::now();
+        // Rever VR's fill (xrfg/fill_frame_gen.hpp): the multiplier is the
+        // ceiling of the synthetics a frame may make, the ini's as on a
+        // session without the dynamic multiplier; its steps (701, 705) would
+        // move the ceiling under a game that is not paced by it. With
+        // fill_dynamic the steps stay: fill is in force only in its own shape
+        // at 2X, and elsewhere the game is paced by the multiplier.
+        const bool dynamic_steps = xrfg::dynamic_multiplier_steps(
+            state->dynamic_frame_gen, state->fill_enabled, state->fill_dynamic,
+            use_continuous_presenter);
+        const std::int64_t frame_now_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        // Rever VR's fill with the dynamic multiplier, every frame: this
+        // frame's own time (fill's interval reads the one before it,
+        // fill_interval) and fill's shape rule - the rescue's, at 2X only
+        // (above it it starts over, without a wait added). The shape itself
+        // moves at the poll below, with the multiplier.
+        if (state->fill_dynamic && use_continuous_presenter) {
+            const std::int64_t returned =
+                state->dynamic_wait_returned_ns.load(std::memory_order_relaxed);
+            const std::int64_t own_ns = frame_now_ns - returned;
+            state->fill_own_previous_ns = state->fill_own_current_ns;
+            state->fill_own_current_ns =
+                returned > 0 && own_ns > 0 && own_ns < 500'000'000 ? own_ns : 0;
+            if (returned > 0 && returned != state->fill_shape_seen_wait_ns) {
+                state->fill_shape_seen_wait_ns = returned;
+                state->fill_shape_rule.on_wait(returned);
+            }
+            if (state->frames_per_application_frame.load() == 2U) {
+                bool changed = false;
+                state->fill_shape_wanted = state->fill_shape_rule.on_end_frame(
+                    frame_now_ns,
+                    static_cast<std::int64_t>(state->minimum_runtime_display_period),
+                    changed);
+            } else {
+                state->fill_shape_rule.passing = false;
+                state->fill_shape_rule.fits_since_ns = -1;
+                state->fill_shape_wanted = false;
+            }
+        }
         // Rever VR's dynamic multiplier: the application's frame time,
         // averaged over about a dozen frames (its pace is the shape's, its
         // frame time is what it can do)
-        if (state->dynamic_frame_gen) {
+        if (dynamic_steps) {
             const std::int64_t returned =
                 state->dynamic_wait_returned_ns.load(std::memory_order_relaxed);
             const std::int64_t frame_ns =
@@ -14835,14 +15633,23 @@ void apply_live_frame_multiplier(
             state->gpu_late_synthetics.exchange(0, std::memory_order_relaxed));
         const std::int64_t now_ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-        if (state->dynamic_frame_gen) {
+        // Rever VR's video memory guard (xrfg/vram_guard.hpp, KB GVX-060): near the budget or while the game
+        // recreates its swapchains, the highest multiplier allowed; 0 for none (always 0 with the guard off).
+        const std::uint32_t vram_cap =
+            state->vram_guard_enabled ? state->vram_guard.cap(now_ns) : 0U;
+        if (dynamic_steps) {
             // One more frame between game frames once a frame takes more
             // than the periods the shape gives it (it would miss its slot),
             // one fewer only when it fits well in one period less (a margin
             // against flapping), never sooner than 3 s after a change. The
-            // ini's multiplier is the ceiling, never below 3.
-            const std::uint32_t ceiling = std::min(
+            // ini's multiplier is the ceiling, never below 3 - but the video
+            // memory guard's cap, while it holds, lower still: neither rule
+            // steps up past it, and the shape goes down to it.
+            std::uint32_t ceiling = std::min(
                 std::max(requested, 3U), state->live_multiplier_ceiling);
+            if (vram_cap >= 2U) {
+                ceiling = std::min(ceiling, vram_cap);
+            }
             const std::uint32_t current = state->frames_per_application_frame;
             requested = std::min(current, ceiling);
             const double period =
@@ -14901,12 +15708,17 @@ void apply_live_frame_multiplier(
         // What the ring fits (V558): a session made with two synthetic slots
         // takes 3X but not 4X. Clamped, and the fixed marker held while the
         // clamp is in force, so the tray can say a restart is needed.
-        const std::uint32_t target =
+        std::uint32_t target =
             std::min(requested, state->live_multiplier_ceiling);
         if (target != requested) {
             state->fixed_frame_multiplier.hold();
         } else {
             state->fixed_frame_multiplier.release();
+        }
+        // Rever VR's video memory guard: the tray's fixed multiplier too (the
+        // fixed marker is the ring's, so it is set above, before the cap).
+        if (vram_cap >= 2U && target > vram_cap) {
+            target = vram_cap;
         }
         // V565: "Prefer FPS over latency" (the deeper pipeline) follows the
         // tray live as well, where the ring fits it (two synthetic slots; a
@@ -14917,8 +15729,17 @@ void apply_live_frame_multiplier(
             xrfg::implicit_layer::read_deep_pipeline(current_layer_directory()) &&
             state->synthetic_ring_slots >= kSyntheticSlotCountDeep;
         const bool target_deep = target == 2U && state->deep_pipeline_configured;
+        // Rever VR's fill with the dynamic multiplier: fill's shape, only at
+        // 2X staying 2X and only while its rule wants it; it changes through
+        // the same drained switch as the multiplier.
+        bool target_shape = state->fill_shape.load();
+        if (state->fill_dynamic && use_continuous_presenter) {
+            target_shape = target == 2U && state->frames_per_application_frame.load() == 2U &&
+                state->fill_shape_wanted;
+        }
         if (target == state->frames_per_application_frame &&
-            target_deep == state->deep_pipeline) {
+            target_deep == state->deep_pipeline &&
+            target_shape == state->fill_shape.load()) {
             return;
         }
         if (use_continuous_presenter &&
@@ -14936,6 +15757,7 @@ void apply_live_frame_multiplier(
             std::scoped_lock content_lock(state->presenter_content_mutex);
             std::scoped_lock lock(state->presenter_mutex);
             state->frames_per_application_frame = target;
+            state->fill_shape = target_shape;
             state->deep_pipeline =
                 target == 2U && state->deep_pipeline_configured;
             deep = state->deep_pipeline;
@@ -14967,6 +15789,23 @@ void apply_live_frame_multiplier(
             target,
             deep ? 1u : 0u,
             2);
+        // Rever VR's fill with the dynamic multiplier: each change in %LOCALAPPDATA%\ReverVR\ofxr_rescue.log (OFXR's
+        // flight log stays off in Rever's sessions).
+        if (state->fill_dynamic) {
+            const double period = static_cast<double>(state->minimum_runtime_display_period);
+            char line[360] = {};
+            std::snprintf(line, sizeof(line),
+                          "fill dynamic: multiplier %uX (%s) - the game's own frame %.2f ms = %.2f periods, its pace "
+                          "%.2f ms; %.1f real frames a second in the last second judged",
+                          target,
+                          target_shape ? "fill in force: the game at up to the display rate"
+                                       : "frames pair as without fill",
+                          state->dynamic_frame_ns / 1e6,
+                          period > 0.0 ? state->dynamic_frame_ns / period : 0.0,
+                          state->fill_shape_rule.interval_ns / 1e6,
+                          state->gpu_aware_multiplier.last_real_fps());
+            rever_rescue_note(line);
+        }
     } catch (...) {
     }
 }
@@ -15000,6 +15839,90 @@ void log_projection_view_rects(
                     rect[1],
                     rect[2]);
             }
+        }
+    } catch (...) {
+    }
+}
+
+// Rever VR's video memory guard (read_rever_vram_guard, xrfg/vram_guard.hpp, KB GVX-060): twice a second the process's
+// video memory against its budget; a recreation of the projection's swapchains stamped since the last call; the cap
+// apply_live_frame_multiplier reads. Each event, and a note every ten seconds, in %LOCALAPPDATA%\ReverVR\ofxr_rescue.log
+// (OFXR's flight log stays off in Rever's sessions). Nothing at all with the guard off. The xrEndFrame thread.
+void poll_vram_guard(SessionState& state) noexcept {
+    try {
+        if (!state.vram_guard_enabled) {
+            return;
+        }
+        const std::int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+        const std::uint32_t current = state.frames_per_application_frame.load();
+        char line[420] = {};
+        const std::int64_t recreated = state.vram_guard_recreated_ns.load(std::memory_order_relaxed);
+        if (recreated != 0 && recreated != state.vram_guard_recreation_seen_ns) {
+            state.vram_guard_recreation_seen_ns = recreated;
+            static_cast<void>(state.vram_guard.swapchain_recreated(now_ns, current));
+            std::snprintf(line, sizeof(line),
+                          "vram guard: the game is making its projection's swapchains again - the multiplier at most "
+                          "%uX for 5 s (it runs %uX)",
+                          state.vram_guard.cap(now_ns), current);
+            rever_rescue_note(line);
+        }
+        if (state.vram_guard.take_recreation_end(now_ns)) {
+            const std::uint32_t cap = state.vram_guard.cap(now_ns);
+            if (cap != 0) {
+                std::snprintf(line, sizeof(line),
+                              "vram guard: the recreation's 5 s are over - the memory's cap stays at %uX", cap);
+            } else {
+                std::snprintf(line, sizeof(line),
+                              "vram guard: the recreation's 5 s are over - no cap (it runs %uX)", current);
+            }
+            rever_rescue_note(line);
+        }
+        if (!state.vram_guard.due(now_ns)) {
+            return;
+        }
+        DXGI_QUERY_VIDEO_MEMORY_INFO local{};
+        if (!query_local_video_memory(state, &local)) {
+            return;
+        }
+        const auto event = state.vram_guard.observe(now_ns, local.CurrentUsage, local.Budget, current);
+        const unsigned long long used_mb = local.CurrentUsage >> 20U;
+        const unsigned long long budget_mb = local.Budget >> 20U;
+        const unsigned long long judged_mb = state.vram_guard.judged_budget(local.Budget) >> 20U;
+        const unsigned long long line_mb = state.vram_guard.line(local.Budget) >> 20U;
+        const char* what = nullptr;
+        switch (event) {
+        case xrfg::VramGuard::Event::pressure: what = "near the budget"; break;
+        case xrfg::VramGuard::Event::over_budget: what = "over the budget (paging)"; break;
+        case xrfg::VramGuard::Event::cleared: what = "well under the line for 5 s"; break;
+        default: break;
+        }
+        char cap_text[40] = "no cap";
+        if (const std::uint32_t cap = state.vram_guard.cap(now_ns); cap != 0) {
+            std::snprintf(cap_text, sizeof(cap_text), "the multiplier at most %uX", cap);
+        }
+        if (what != nullptr) {
+            std::snprintf(line, sizeof(line),
+                          "vram guard: %s - %llu MB used of %llu MB (%llu MB answered by DXGI), the line at %llu MB: "
+                          "%s (it runs %uX)",
+                          what, used_mb, judged_mb, budget_mb, line_mb, cap_text, current);
+            rever_rescue_note(line);
+        }
+        if (state.vram_guard_note_at_ns == 0) {
+            state.vram_guard_note_at_ns = now_ns + 10'000'000'000;
+        } else if (now_ns >= state.vram_guard_note_at_ns) {
+            state.vram_guard_note_at_ns = now_ns + 10'000'000'000;
+            std::snprintf(line, sizeof(line),
+                          "vram guard (10 s): %llu MB used now, %llu MB at most, %llu MB least headroom under the %llu "
+                          "MB judged (DXGI answers %llu MB, the line at %llu MB); %s (it runs %uX); %u memory "
+                          "event(s), %u recreation(s) so far",
+                          used_mb, static_cast<unsigned long long>(state.vram_guard.peak_usage() >> 20U),
+                          static_cast<unsigned long long>(state.vram_guard.least_headroom() >> 20U), judged_mb,
+                          budget_mb, line_mb, cap_text, current, state.vram_guard.pressures(),
+                          state.vram_guard.recreations());
+            rever_rescue_note(line);
+            state.vram_guard.take_window();
         }
     } catch (...) {
     }
@@ -15186,6 +16109,7 @@ XrResult layer_end_frame_impl(
         return XR_SUCCESS;
     };
 
+    poll_vram_guard(*state);  // Rever VR (KB GVX-060): its cap read just below; nothing with the guard off
     apply_live_frame_multiplier(state, use_continuous_presenter);
     poll_turn_brake(*state);
     follow_composition_switches();
@@ -15461,7 +16385,55 @@ XrResult layer_end_frame_impl(
         }
         // The application's frame is already downstream; nothing this costs is
         // on its deadline any more.
+        //
+        // Rever VR's video memory guard (KB GVX-060): the game replaced its
+        // projection's swapchains and has not destroyed the old ones yet (MSFS
+        // 2024 at 08:51:39) - their generation images go first, so the new set
+        // is never made on top of the old one. The presenter idle and its
+        // content lock held only for that, then given back before the arming.
+        if (state->vram_guard_enabled) {
+            const std::int64_t release_now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            auto replaced = replaced_generation_swapchains(state, projection_mappings);
+            if (!replaced.empty() &&
+                (state->vram_guard_released_ns == 0 ||
+                 release_now_ns - state->vram_guard_released_ns >= xrfg::VramGuard::kRecreationNs)) {
+                const XrResult exclusive_result = enter_presenter_exclusive();
+                if (XR_FAILED(exclusive_result)) {
+                    return exclusive_result;
+                }
+                char before[64] = {};
+                describe_video_memory(*state, before, sizeof(before));
+                release_replaced_generation(state, replaced);
+                state->vram_guard_released_ns = release_now_ns;
+                if (presenter_content_lock.owns_lock()) {
+                    presenter_content_lock.unlock();
+                }
+                char after[64] = {};
+                describe_video_memory(*state, after, sizeof(after));
+                char line[320] = {};
+                std::snprintf(line, sizeof(line),
+                              "vram guard: the game replaced its projection's swapchains - the generation images of "
+                              "%zu old one(s) released before the new ones are made (video memory %s before, %s "
+                              "after)",
+                              replaced.size(), before, after);
+                rever_rescue_note(line);
+            } else if (!replaced.empty()) {
+                rever_rescue_note("vram guard: the game replaced its projection's swapchains again within 5 s - the "
+                                  "old ones keep their generation images until the game destroys them");
+            }
+        }
         if (ensure_projection_frame_generation(state, projection_mappings)) {
+            if (state->vram_guard_enabled) {
+                char memory[64] = {};
+                describe_video_memory(*state, memory, sizeof(memory));
+                char line[200] = {};
+                std::snprintf(line, sizeof(line),
+                              "vram guard: generation %s for the projection's %zu swapchain(s) (video memory %s)",
+                              projection_generation_armed(projection_mappings) ? "armed" : "not armed",
+                              projection_mappings.size(), memory);
+                rever_rescue_note(line);
+            }
             if (projection_generation_armed(projection_mappings)) {
                 arm_panel_generation(state, panels);
             }
@@ -15520,7 +16492,20 @@ XrResult layer_end_frame_impl(
     // Rever VR's turn brake (KB ALI-079): a frame that would pair is primed while the head turns fast.
     const bool turn_braked =
         metadata_pairable && update_turn_brake(*state, *previous_snapshot, current_snapshot);
-    const bool pair_requested = metadata_pairable && !turn_braked;
+    // Rever VR's rescue (xrfg/rescue_frame_gen.hpp): while the game keeps up by itself its frames are primed too and go
+    // in its own slot - the inline second cycle that halves its pace does not run
+    const bool rescue_passing =
+        update_rescue(*state, use_continuous_presenter, application_display_period);
+    // Rever VR's fill (xrfg/fill_frame_gen.hpp): on the presenter a frame that followed the previous real frame by one
+    // display period goes alone, primed; one that came later pairs, with a synthetic for each slot it missed up to the
+    // multiplier. 0: fill does not apply here.
+    const std::uint32_t fill_submissions = update_fill(
+        *state, use_continuous_presenter, previous_snapshot, current_snapshot,
+        metadata_pairable && !turn_braked && !rescue_passing);
+    const bool fill_active = fill_submissions != 0;
+    note_rever_timing(*state, use_continuous_presenter);
+    const bool pair_requested = metadata_pairable && !turn_braked && !rescue_passing &&
+        (!fill_active || fill_submissions >= 2);
     if (previous_snapshot && !snapshots_compatible) {
         if (!projection_resource_layout_compatible(
                 *previous_snapshot,
@@ -15561,8 +16546,10 @@ XrResult layer_end_frame_impl(
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
         }
+        // Under fill every frame is held, a presenter frame past the last
+        // release (wait_for_presenter_pair), on every runtime.
         if (presenter_hold_at_admission(*state) &&
-            (pair_requested || presenter_holds_primes(*state))) {
+            (pair_requested || presenter_holds_primes(*state) || fill_active)) {
             // The once-per-pair hold, ahead of synthesis rather than after the
             // hand-over: see presenter_hold_at_admission for why the placement
             // matters. A frame that will pair is held for the pair; one that
@@ -15584,7 +16571,13 @@ XrResult layer_end_frame_impl(
     // application's frame interval it changes every frame rather than being a
     // constant offset nobody would see. Alternating early and late is what
     // reads as judder.
-    const std::uint32_t frames_per_frame = state->frames_per_application_frame;
+    //
+    // Rever VR's fill: the submissions this frame takes, so its synthetics
+    // sit at the instants of the slots they are shown in - (i + 1) / gap
+    // when every slot of the gap is filled.
+    const std::uint32_t frames_per_frame = fill_active
+        ? std::max(fill_submissions, 2U)
+        : state->frames_per_application_frame.load();
     const float interpolation_fraction = synthetic_interpolation_fraction(
         state,
         previous_snapshot,
@@ -16032,7 +17025,10 @@ XrResult layer_end_frame_impl(
             if (presenter_content_lock.owns_lock()) {
                 presenter_content_lock.unlock();
             }
-            if (state->deep_pipeline) {
+            // Rever VR's fill as well: there a frame going alone is the game
+            // keeping up, not a reset, and waiting for its own hand-over
+            // would take the presenter's runtime call out of its next frame.
+            if (state->deep_pipeline || fill_active) {
                 // Enqueue and return, exactly as a pair does. Waiting here
                 // blocks the application until the presenter has submitted
                 // this frame, which behind a deeper queue is most of the
@@ -16124,7 +17120,11 @@ XrResult layer_end_frame_impl(
             static_cast<std::uint32_t>(result));
         return result;
     }
-    if (pair_ready) {
+    // Under Rever VR's fill a frame going alone is generation running too: the
+    // game keeping up, its history kept.
+    if (pair_ready ||
+        (fill_active && presenter_first_frame &&
+         prepared.kind == PreparedGenerationKind::prime)) {
         state->generation_steady_state_established = true;
     }
     if (use_continuous_presenter && !pipelined_presenter_mode) {
@@ -16218,9 +17218,11 @@ XrResult layer_end_frame_impl(
         return XR_FAILED(start_result) ? start_result : result;
     }
 
+    // Under Rever VR's fill every frame is held, a presenter frame past the
+    // last release, on every runtime: nothing else paces the game there.
     const bool presenter_prime = use_continuous_presenter &&
         prepared.kind == PreparedGenerationKind::prime &&
-        presenter_holds_primes(*state);
+        (presenter_holds_primes(*state) || fill_active);
     if (!pair_ready && !presenter_prime) {
         return result;
     }
@@ -16451,9 +17453,9 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_wait_frame(
     const XrResult result = guard_c_api_boundary([&] {
         return layer_wait_frame_impl(session, wait_info, frame_state);
     });
-    // Rever VR's dynamic multiplier: the application's frame starts here
+    // Rever VR's dynamic multiplier and rescue: the application's frame starts here
     if (XR_SUCCEEDED(result)) {
-        if (const auto state = find_session(session); state && state->dynamic_frame_gen) {
+        if (const auto state = find_session(session); state && (state->dynamic_frame_gen || state->rescue_enabled)) {
             state->dynamic_wait_returned_ns.store(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
